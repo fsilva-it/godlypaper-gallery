@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #050a16; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// ---- user properties (defaults must match manifest.json) -------------------
+var speed = 1;
+var moonOn = true;
+var baseColor = { r: 26, g: 56, b: 107 }; // "0.1 0.22 0.42"
+
+// ---- state -----------------------------------------------------------------
+var paused = false;
+var t = 0;             // wallpaper-time in seconds; frozen while paused
+var lastTs = 0;
+var stars = [];
+var streaks = [];
+var layers = [];
+var bg = null;         // offscreen: sky gradient + moon + glow (static)
+var reflTint = "#fff";
+var moonX = 0, moonY = 0, moonR = 0;
+
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+function mix(a, b, f) {
+  return "rgb(" +
+    Math.round(a.r + (b.r - a.r) * f) + "," +
+    Math.round(a.g + (b.g - a.g) * f) + "," +
+    Math.round(a.b + (b.b - a.b) * f) + ")";
+}
+var LIGHT = { r: 128, g: 158, b: 200 };
+var WHITE = { r: 235, g: 240, b: 250 };
+var BLACK = { r: 2, g: 5, b: 12 };
+
+// ---- palette: four wave shades derived from the one user color -------------
+function updatePalette() {
+  var w = canvas.width, h = canvas.height;
+  // back -> front: moonlit horizon fading into near-black foreground
+  var shades = [
+    mix(baseColor, LIGHT, 0.28),
+    mix(baseColor, BLACK, 0.10),
+    mix(baseColor, BLACK, 0.42),
+    mix(baseColor, BLACK, 0.66)
+  ];
+  // wave geometry: baseline (fraction of h), two summed sines each
+  var geo = [
+    { y: 0.700, a1: 0.008, a2: 0.004, l1: 0.90, l2: 0.31, s1: 0.11, s2: 0.07 },
+    { y: 0.765, a1: 0.011, a2: 0.005, l1: 0.72, l2: 0.26, s1: 0.16, s2: 0.10 },
+    { y: 0.830, a1: 0.014, a2: 0.007, l1: 0.58, l2: 0.21, s1: 0.22, s2: 0.14 },
+    { y: 0.895, a1: 0.017, a2: 0.009, l1: 0.46, l2: 0.17, s1: 0.30, s2: 0.19 }
+  ];
+  layers = [];
+  for (var i = 0; i < geo.length; i++) {
+    var g = geo[i];
+    layers.push({
+      fill: shades[i],
+      baseY: g.y * h,
+      a1: g.a1 * h, a2: g.a2 * h,
+      k1: 2 * Math.PI / (g.l1 * w), k2: 2 * Math.PI / (g.l2 * w),
+      s1: g.s1, s2: g.s2,
+      p1: i * 1.7, p2: i * 2.9
+    });
+  }
+  reflTint = mix(baseColor, WHITE, 0.78);
+}
+
+// ---- static background: sky gradient, moon disc + glow ---------------------
+function buildBackground() {
+  var w = canvas.width, h = canvas.height;
+  bg = document.createElement("canvas");
+  bg.width = w; bg.height = h;
+  var b = bg.getContext("2d");
+
+  var sky = b.createLinearGradient(0, 0, 0, h * 0.75);
+  sky.addColorStop(0, "#04070f");
+  sky.addColorStop(0.55, "#0a1226");
+  sky.addColorStop(1, "#15243f");
+  b.fillStyle = sky;
+  b.fillRect(0, 0, w, h);
+
+  moonX = w * 0.72;
+  moonY = h * 0.26;
+  moonR = Math.min(w, h) * 0.045;
+
+  if (moonOn) {
+    // soft wide glow (one gradient, built once — never per frame)
+    var glow = b.createRadialGradient(moonX, moonY, moonR * 0.4, moonX, moonY, moonR * 7);
+    glow.addColorStop(0, "rgba(210,222,245,0.35)");
+    glow.addColorStop(0.35, "rgba(170,190,230,0.10)");
+    glow.addColorStop(1, "rgba(170,190,230,0)");
+    b.fillStyle = glow;
+    b.fillRect(moonX - moonR * 7, moonY - moonR * 7, moonR * 14, moonR * 14);
+
+    // disc with a soft limb
+    var disc = b.createRadialGradient(
+      moonX - moonR * 0.25, moonY - moonR * 0.25, moonR * 0.2,
+      moonX, moonY, moonR);
+    disc.addColorStop(0, "#f4f7fc");
+    disc.addColorStop(0.8, "#dbe4f2");
+    disc.addColorStop(1, "#b9c8e0");
+    b.fillStyle = disc;
+    b.beginPath();
+    b.arc(moonX, moonY, moonR, 0, 7);
+    b.fill();
+
+    // faint maria
+    b.fillStyle = "rgba(150,165,195,0.28)";
+    b.beginPath(); b.arc(moonX + moonR * 0.28, moonY - moonR * 0.10, moonR * 0.26, 0, 7); b.fill();
+    b.beginPath(); b.arc(moonX - moonR * 0.22, moonY + moonR * 0.30, moonR * 0.18, 0, 7); b.fill();
+    b.beginPath(); b.arc(moonX - moonR * 0.05, moonY - moonR * 0.42, moonR * 0.13, 0, 7); b.fill();
+  }
+}
+
+// ---- seeds -----------------------------------------------------------------
+function seedStars() {
+  var w = canvas.width, h = canvas.height;
+  var n = Math.round(90 * (w * h) / (2560 * 1600 * devicePixelRatio * devicePixelRatio)) + 50;
+  stars = [];
+  for (var i = 0; i < n; i++) {
+    stars.push({
+      x: Math.random() * w,
+      y: Math.random() * h * 0.62,
+      r: (0.6 + Math.random() * 1.1) * devicePixelRatio,
+      a: 0.25 + Math.random() * 0.45,   // base alpha
+      tw: 0.08 + Math.random() * 0.22,  // twinkle amplitude
+      f: 0.15 + Math.random() * 0.45,   // twinkle freq (rad/s) — slow
+      p: Math.random() * 6.283
+    });
+  }
+}
+
+function seedStreaks() {
+  var h = canvas.height;
+  streaks = [];
+  for (var i = 0; i < 26; i++) {
+    var d = i / 25; // 0 = horizon, 1 = bottom
+    streaks.push({
+      y: (0.705 + d * 0.27) * h,
+      d: d,
+      p: Math.random() * 6.283,
+      p2: Math.random() * 6.283,
+      f: 0.25 + Math.random() * 0.35,
+      f2: 0.3 + Math.random() * 0.4
+    });
+  }
+}
+
+// ---- sizing ----------------------------------------------------------------
+function resize() {
+  canvas.width = innerWidth * devicePixelRatio;
+  canvas.height = innerHeight * devicePixelRatio;
+  updatePalette();
+  buildBackground();
+  seedStars();
+  seedStreaks();
+}
+addEventListener("resize", resize);
+resize();
+
+// ---- frame -----------------------------------------------------------------
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (paused) { lastTs = ts; return; }        // rAF keeps running, work stops
+  var dt = (ts - lastTs) / 1000;
+  lastTs = ts;
+  if (dt > 0 && dt < 0.25) t += dt * speed;   // clamp throttle jumps
+
+  var w = canvas.width, h = canvas.height;
+
+  // sky + moon (pre-rendered)
+  ctx.drawImage(bg, 0, 0);
+
+  // stars — slow twinkle, tiny rects
+  ctx.fillStyle = "#ccd8ec";
+  for (var i = 0; i < stars.length; i++) {
+    var s = stars[i];
+    var a = s.a + s.tw * Math.sin(t * s.f + s.p);
+    if (a <= 0.02) continue;
+    ctx.globalAlpha = a;
+    ctx.fillRect(s.x, s.y, s.r, s.r);
+  }
+  ctx.globalAlpha = 1;
+
+  // waves — four filled sine-sum silhouettes, back to front
+  var dx = 8 * devicePixelRatio;
+  for (var L = 0; L < layers.length; L++) {
+    var v = layers[L];
+    ctx.fillStyle = v.fill;
+    ctx.beginPath();
+    ctx.moveTo(0, v.baseY + v.a1 * Math.sin(t * v.s1 + v.p1) + v.a2 * Math.sin(-t * v.s2 + v.p2));
+    for (var x = dx; x <= w + dx; x += dx) {
+      var y = v.baseY +
+        v.a1 * Math.sin(x * v.k1 + t * v.s1 + v.p1) +
+        v.a2 * Math.sin(x * v.k2 - t * v.s2 + v.p2);
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // moon reflection — a shimmering column of thin streaks under the moon
+  if (moonOn) {
+    ctx.fillStyle = reflTint;
+    var sh = Math.max(1.5 * devicePixelRatio, 2);
+    for (var j = 0; j < streaks.length; j++) {
+      var k = streaks[j];
+      var fade = 1 - k.d;                                  // brightest near horizon
+      var alpha = fade * fade * 0.22 * (0.7 + 0.3 * Math.sin(t * k.f2 + k.p2));
+      if (alpha <= 0.01) continue;
+      var halfW = (moonR * 0.9 + k.d * w * 0.045) * (0.72 + 0.28 * Math.sin(t * k.f + k.p2));
+      var cx = moonX + Math.sin(t * k.f * 0.6 + k.p) * (moonR * 0.35 + k.d * moonR * 1.2);
+      ctx.globalAlpha = alpha;
+      ctx.fillRect(cx - halfW, k.y, halfW * 2, sh);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+requestAnimationFrame(frame);
+
+// ---- GodlyPaper / Wallpaper Engine shim ------------------------------------
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.wavecolor) {
+      baseColor = weColor(props.wavecolor.value);
+      updatePalette();
+    }
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.moon) {
+      var v = props.moon.value;
+      moonOn = (v === true || v === "true" || v === 1);
+      buildBackground();
+    }
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "minimal-clock",
+  "version": "1.0.0",
+  "type": "web",
+  "title": "Minimal Clock",
+  "author": { "name": "GodlyPaper", "url": "https://github.com/godlypaper" },
+  "license": "CC0-1.0",
+  "entry": "index.html",
+  "preview": "preview.jpg",
+  "tags": ["clock", "minimal", "time"],
+  "contentRating": "everyone",
+  "web": { "allowNetwork": false },
+  "properties": {
+    "textcolor":   { "type": "color", "label": "Text color",      "order": 0, "default": "0.92 0.94 0.96" },
+    "tint":        { "type": "color", "label": "Background tint", "order": 1, "default": "0.10 0.18 0.36" },
+    "showdate":    { "type": "bool",  "label": "Show date",       "order": 2, "default": true },
+    "showseconds": { "type": "bool",  "label": "Show seconds",    "order": 3, "default": false }
+  }
+}

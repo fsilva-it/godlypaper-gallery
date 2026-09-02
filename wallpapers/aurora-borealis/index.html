@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #01020a; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// Aurora Borealis — northern lights over a static starfield.
+// Curtains are vertical slices of pre-rendered gradient sprites whose
+// bottom edge, height, brightness and hue undulate via layered sines.
+// The aurora is rendered on a low-res offscreen canvas and scaled up
+// (it is soft light, so upscaling is invisible and keeps frames cheap).
+
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// ---- user properties (defaults mirror manifest.json) ----
+var intensity = 1;
+var speed = 1;
+var color = { r: 64, g: 230, b: 153 }; // "0.25 0.9 0.6" teal-green
+
+var paused = false;
+var t = 0;                 // animation clock, seconds (speed-scaled)
+var last = performance.now();
+
+// ---- curtain definitions (fractions of aurora-canvas size) ----
+// shift: hue offset (deg) from base color; baseY: bottom edge; baseH: height
+var CURTAINS = [
+  { shift:   0, baseY: 0.50, baseH: 0.36, sway: 0.050, alpha: 0.90,
+    f1: 7.3, w1: 0.110, f2: 15.1, w2: 0.073, fh: 5.1, wh: 0.090,
+    fa: 11.7, wa: 0.140, fc: 3.9, wc: 0.055, p: 0.0 },
+  { shift:  55, baseY: 0.38, baseH: 0.30, sway: 0.065, alpha: 0.55,
+    f1: 5.2, w1: 0.080, f2: 11.4, w2: 0.120, fh: 6.6, wh: 0.065,
+    fa:  9.3, wa: 0.100, fc: 4.6, wc: 0.070, p: 2.1 },
+  { shift: -25, baseY: 0.62, baseH: 0.24, sway: 0.040, alpha: 0.45,
+    f1: 8.8, w1: 0.095, f2: 13.6, w2: 0.060, fh: 4.3, wh: 0.110,
+    fa: 14.2, wa: 0.085, fc: 5.3, wc: 0.048, p: 4.4 }
+];
+var HUE_VARIANTS = 13;     // sprites per curtain across a +/-28 deg hue arc
+var HUE_ARC = 56;
+
+var bg = null;             // baked sky + stars (device resolution)
+var aur = null, actx = null; // low-res aurora layer
+var aW = 0, aH = 0, stripW = 4, strips = 0;
+var sprites = [];          // [curtain][variant] -> 2x256 canvas
+
+// ---- color helpers ----
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+function rgbToHsl(c) {
+  var r = c.r / 255, g = c.g / 255, b = c.b / 255;
+  var max = Math.max(r, g, b), min = Math.min(r, g, b);
+  var h = 0, s = 0, l = (max + min) / 2, d = max - min;
+  if (d > 0) {
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0));
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+  }
+  return { h: h, s: s, l: l };
+}
+function hslToRgb(h, s, l) {
+  h = ((h % 360) + 360) % 360;
+  var c = (1 - Math.abs(2 * l - 1)) * s;
+  var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  var m = l - c / 2, r = 0, g = 0, b = 0;
+  if (h < 60)       { r = c; g = x; }
+  else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; }
+  else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; }
+  else              { r = c; b = x; }
+  return { r: Math.round((r + m) * 255), g: Math.round((g + m) * 255), b: Math.round((b + m) * 255) };
+}
+function rgba(c, a) { return "rgba(" + c.r + "," + c.g + "," + c.b + "," + a + ")"; }
+
+// ---- build the per-curtain gradient sprites (only on color/intensity change) ----
+function buildSprites() {
+  var base = rgbToHsl(color);
+  var boost = Math.min(1.35, intensity);
+  sprites = [];
+  for (var c = 0; c < CURTAINS.length; c++) {
+    var row = [];
+    for (var v = 0; v < HUE_VARIANTS; v++) {
+      var hue = base.h + CURTAINS[c].shift + (-HUE_ARC / 2 + HUE_ARC * v / (HUE_VARIANTS - 1));
+      var mid = hslToRgb(hue, Math.min(1, base.s), base.l);
+      var tip = hslToRgb(hue, Math.min(1, base.s * 0.7), Math.min(0.92, base.l + 0.28));
+      var s = document.createElement("canvas");
+      s.width = 2; s.height = 256;
+      var g = s.getContext("2d").createLinearGradient(0, 0, 0, 256);
+      g.addColorStop(0.00, rgba(mid, 0));
+      g.addColorStop(0.45, rgba(mid, Math.min(1, 0.10 * boost)));
+      g.addColorStop(0.78, rgba(mid, Math.min(1, 0.38 * boost)));
+      g.addColorStop(0.94, rgba(tip, Math.min(1, 0.66 * boost)));
+      g.addColorStop(1.00, rgba(tip, Math.min(1, 0.80 * boost)));
+      var sc = s.getContext("2d");
+      sc.fillStyle = g;
+      sc.fillRect(0, 0, 2, 256);
+      row.push(s);
+    }
+    sprites.push(row);
+  }
+}
+
+// ---- bake the night sky + sparse static stars ----
+function buildBackground() {
+  bg = document.createElement("canvas");
+  bg.width = canvas.width; bg.height = canvas.height;
+  var b = bg.getContext("2d");
+  var sky = b.createLinearGradient(0, 0, 0, bg.height);
+  sky.addColorStop(0.0, "#01020a");
+  sky.addColorStop(0.6, "#030817");
+  sky.addColorStop(1.0, "#071020");
+  b.fillStyle = sky;
+  b.fillRect(0, 0, bg.width, bg.height);
+
+  // faint horizon glow tinted by the aurora color
+  var glow = b.createLinearGradient(0, bg.height * 0.55, 0, bg.height);
+  glow.addColorStop(0, rgba(color, 0));
+  glow.addColorStop(1, rgba(color, 0.06 * Math.min(1, intensity)));
+  b.fillStyle = glow;
+  b.fillRect(0, bg.height * 0.55, bg.width, bg.height * 0.45);
+
+  // sparse static stars (deterministic count per screen area)
+  var dpr = devicePixelRatio || 1;
+  var count = Math.round((bg.width * bg.height) / (dpr * dpr) / 11000);
+  for (var i = 0; i < count; i++) {
+    var x = Math.random() * bg.width;
+    var y = Math.random() * bg.height * 0.82;
+    var r = (0.4 + Math.random() * 1.0) * dpr;
+    var a = 0.25 + Math.random() * 0.65;
+    b.fillStyle = "rgba(220,232,255," + a.toFixed(2) + ")";
+    b.beginPath();
+    b.arc(x, y, r, 0, 7);
+    b.fill();
+  }
+  // a handful of brighter stars with a soft baked halo
+  for (var j = 0; j < 7; j++) {
+    var hx = Math.random() * bg.width;
+    var hy = Math.random() * bg.height * 0.6;
+    var hr = (5 + Math.random() * 5) * dpr;
+    var halo = b.createRadialGradient(hx, hy, 0, hx, hy, hr);
+    halo.addColorStop(0, "rgba(230,240,255,0.85)");
+    halo.addColorStop(0.25, "rgba(210,225,255,0.18)");
+    halo.addColorStop(1, "rgba(210,225,255,0)");
+    b.fillStyle = halo;
+    b.beginPath();
+    b.arc(hx, hy, hr, 0, 7);
+    b.fill();
+  }
+}
+
+// ---- sizing ----
+function resize() {
+  canvas.width = Math.max(1, Math.round(innerWidth * devicePixelRatio));
+  canvas.height = Math.max(1, Math.round(innerHeight * devicePixelRatio));
+
+  var scale = Math.min(1, 1280 / canvas.width);
+  aW = Math.max(1, Math.round(canvas.width * scale));
+  aH = Math.max(1, Math.round(canvas.height * scale));
+  aur = document.createElement("canvas");
+  aur.width = aW; aur.height = aH;
+  actx = aur.getContext("2d");
+  actx.globalCompositeOperation = "lighter";
+
+  stripW = Math.max(4, Math.round(aW / 220));
+  strips = Math.ceil(aW / stripW) + 1;
+
+  buildBackground();
+}
+addEventListener("resize", resize);
+resize();
+buildSprites();
+
+// ---- per-frame drawing ----
+function drawAurora() {
+  actx.clearRect(0, 0, aW, aH);
+  for (var c = 0; c < CURTAINS.length; c++) {
+    var k = CURTAINS[c];
+    var row = sprites[c];
+    var bottomBase = k.baseY * aH;
+    var swayAmp = k.sway * aH;
+    var hBase = k.baseH * aH;
+    for (var i = 0; i < strips; i++) {
+      var u = i / strips;
+      var bottom = bottomBase
+        + swayAmp * Math.sin(u * k.f1 + t * k.w1 + k.p)
+        + swayAmp * 0.5 * Math.sin(u * k.f2 - t * k.w2 + k.p * 2.0);
+      var hgt = hBase * (0.72 + 0.28 * Math.sin(u * k.fh + t * k.wh + k.p));
+      var ripple = 0.5 + 0.5 * Math.sin(u * k.fa - t * k.wa + k.p * 3.0);
+      actx.globalAlpha = k.alpha * (0.40 + 0.60 * ripple) * Math.min(1, 0.6 + 0.4 * intensity);
+      var hv = 0.5 + 0.5 * Math.sin(u * k.fc + t * k.wc + k.p);
+      var idx = (hv * (HUE_VARIANTS - 1)) | 0;
+      actx.drawImage(row[idx], i * stripW, bottom - hgt, stripW + 1, hgt);
+    }
+  }
+  actx.globalAlpha = 1;
+}
+
+function frame(now) {
+  if (!paused) {
+    var dt = Math.min(now - last, 100) / 1000;
+    t += dt * speed;
+    drawAurora();
+    ctx.drawImage(bg, 0, 0);
+    ctx.drawImage(aur, 0, 0, canvas.width, canvas.height);
+  }
+  last = now;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---- GodlyPaper / Wallpaper Engine shim API ----
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.intensity) {
+      intensity = Number(props.intensity.value);
+      buildSprites();
+      buildBackground();
+    }
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.aurcolor) {
+      color = weColor(props.aurcolor.value);
+      buildSprites();
+      buildBackground();
+    }
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "fireflies",
+  "version": "1.0.0",
+  "type": "web",
+  "title": "Fireflies",
+  "author": { "name": "GodlyPaper", "url": "https://github.com/godlypaper" },
+  "license": "CC0-1.0",
+  "entry": "index.html",
+  "preview": "preview.jpg",
+  "tags": ["nature", "night", "calm"],
+  "contentRating": "everyone",
+  "web": { "allowNetwork": false },
+  "properties": {
+    "count":     { "type": "slider", "label": "Fireflies", "order": 0, "default": 45, "min": 10, "max": 120, "step": 5 },
+    "speed":     { "type": "slider", "label": "Speed", "order": 1, "default": 1, "min": 0.2, "max": 3, "step": 0.1 },
+    "glowcolor": { "type": "color", "label": "Glow color", "order": 2, "default": "1 0.84 0.45" }
+  }
+}

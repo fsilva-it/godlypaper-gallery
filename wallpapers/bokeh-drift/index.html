@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #050308; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+
+// bokeh-drift — defocused city lights drifting slowly in depth layers.
+// All heavy work (gradients) is pre-rendered to sprite/background canvases;
+// the per-frame loop is one background blit plus <=40 scaled sprite blits.
+
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// --- User properties (defaults mirror manifest.json) ---------------------
+var userColor = { r: 1, g: 0.72, b: 0.35 }; // warm amber, 0..1 floats
+var count = 18;
+var speed = 1;
+var paused = false;
+
+// --- Small color helpers -------------------------------------------------
+function clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+
+function mix(a, b, t) {
+  return {
+    r: a.r + (b.r - a.r) * t,
+    g: a.g + (b.g - a.g) * t,
+    b: a.b + (b.b - a.b) * t
+  };
+}
+
+function rgba(c, a) {
+  return "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," +
+         Math.round(c.b * 255) + "," + a + ")";
+}
+
+function rgbToHsl(c) {
+  var r = c.r, g = c.g, b = c.b;
+  var max = Math.max(r, g, b), min = Math.min(r, g, b);
+  var h = 0, s = 0, l = (max + min) / 2, d = max - min;
+  if (d > 0) {
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+  return { h: h, s: s, l: l };
+}
+
+function hslToRgb(h, s, l) {
+  h = ((h % 1) + 1) % 1;
+  function f(n) {
+    var k = (n + h * 12) % 12;
+    var a = s * Math.min(l, 1 - l);
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  }
+  return { r: f(0), g: f(8), b: f(4) };
+}
+
+// WE color strings are "r g b" floats, e.g. "1 0.72 0.35".
+function weColor(v) {
+  var p = String(v).split(" ");
+  return {
+    r: clamp01(parseFloat(p[0]) || 0),
+    g: clamp01(parseFloat(p[1]) || 0),
+    b: clamp01(parseFloat(p[2]) || 0)
+  };
+}
+
+// --- Canvas sizing -------------------------------------------------------
+function resize() {
+  canvas.width = innerWidth * devicePixelRatio;
+  canvas.height = innerHeight * devicePixelRatio;
+  buildBackground(); // background is cached at canvas resolution
+}
+addEventListener("resize", resize);
+
+// --- Palette + pre-rendered sprites --------------------------------------
+// Mostly the user's (warm) color, with a couple of cool complements and a
+// warm near-white mixed in, like a street of assorted lamps out of focus.
+var palette = [];
+var sprites = [];
+var SPRITE = 256;
+var WHITE = { r: 1, g: 0.97, b: 0.9 };
+var COLOR_WEIGHTS = [0.34, 0.2, 0.18, 0.12, 0.16]; // must sum to 1
+
+function buildPalette() {
+  var hsl = rgbToHsl(userColor);
+  var deep = {
+    r: clamp01(userColor.r * 0.95),
+    g: clamp01(userColor.g * 0.6),
+    b: clamp01(userColor.b * 0.45)
+  };
+  var cool  = hslToRgb(hsl.h + 0.5,  Math.min(0.7, hsl.s * 0.75 + 0.1), 0.62);
+  var cool2 = hslToRgb(hsl.h + 0.42, Math.min(0.6, hsl.s * 0.6 + 0.1), 0.58);
+  palette = [userColor, deep, cool, cool2, mix(userColor, WHITE, 0.6)];
+}
+
+function buildSprites() {
+  sprites = [];
+  var mid = SPRITE / 2;
+  for (var i = 0; i < palette.length; i++) {
+    var c = palette[i];
+    var cv = document.createElement("canvas");
+    cv.width = cv.height = SPRITE;
+    var g2 = cv.getContext("2d");
+    var grad = g2.createRadialGradient(mid, mid, 0, mid, mid, mid);
+    var core = mix(c, WHITE, 0.35);
+    grad.addColorStop(0, rgba(core, 1));
+    grad.addColorStop(0.35, rgba(c, 0.85));
+    grad.addColorStop(0.72, rgba(c, 0.4));
+    grad.addColorStop(1, rgba(c, 0));
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, SPRITE, SPRITE);
+    sprites.push(cv);
+  }
+}
+
+function pickColorIndex() {
+  var r = Math.random(), acc = 0;
+  for (var i = 0; i < COLOR_WEIGHTS.length; i++) {
+    acc += COLOR_WEIGHTS[i];
+    if (r < acc) return i;
+  }
+  return COLOR_WEIGHTS.length - 1;
+}
+
+// --- Cached background: near-black with a faint warm glow low down -------
+var bg = null;
+
+function buildBackground() {
+  bg = document.createElement("canvas");
+  bg.width = canvas.width;
+  bg.height = canvas.height;
+  var b = bg.getContext("2d");
+  var top = { r: 0.014, g: 0.01, b: 0.022 };
+  var bottom = mix({ r: 0.03, g: 0.022, b: 0.018 }, userColor, 0.06);
+  var lin = b.createLinearGradient(0, 0, 0, bg.height);
+  lin.addColorStop(0, rgba(top, 1));
+  lin.addColorStop(1, rgba(bottom, 1));
+  b.fillStyle = lin;
+  b.fillRect(0, 0, bg.width, bg.height);
+  // Broad, very faint glow near the bottom, like distant light haze.
+  var rad = b.createRadialGradient(
+    bg.width * 0.5, bg.height * 0.95, 0,
+    bg.width * 0.5, bg.height * 0.95, bg.height * 0.9
+  );
+  rad.addColorStop(0, rgba(userColor, 0.05));
+  rad.addColorStop(1, rgba(userColor, 0));
+  b.fillStyle = rad;
+  b.fillRect(0, 0, bg.width, bg.height);
+}
+
+// --- Lights --------------------------------------------------------------
+// Positions/velocities are normalized (0..1 of canvas) so resizing never
+// reshuffles the scene. Radii are fractions of canvas height.
+var LAYERS = [ // far -> near: bigger, brighter, faster (parallax)
+  { rMin: 0.045, rMax: 0.10, aMin: 0.10, aMax: 0.18, vMin: 0.0008, vMax: 0.0018 },
+  { rMin: 0.09,  rMax: 0.16, aMin: 0.13, aMax: 0.22, vMin: 0.0015, vMax: 0.0030 },
+  { rMin: 0.15,  rMax: 0.26, aMin: 0.15, aMax: 0.28, vMin: 0.0028, vMax: 0.0050 }
+];
+var LAYER_WEIGHTS = [0.4, 0.35, 0.25];
+var lights = [];
+
+function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+function makeLight() {
+  var r = Math.random(), layer = 0, acc = 0;
+  for (var i = 0; i < LAYER_WEIGHTS.length; i++) {
+    acc += LAYER_WEIGHTS[i];
+    if (r < acc) { layer = i; break; }
+  }
+  var L = LAYERS[layer];
+  var ang = rand(-0.45, 0.45);            // mostly-horizontal drift
+  var dir = Math.random() < 0.5 ? -1 : 1;
+  var v = rand(L.vMin, L.vMax);
+  return {
+    x: Math.random(),
+    y: Math.random(),
+    layer: layer,
+    r: rand(L.rMin, L.rMax),
+    baseA: rand(L.aMin, L.aMax),
+    vx: Math.cos(ang) * v * dir,
+    vy: Math.sin(ang) * v * 0.4,
+    phase: Math.random() * Math.PI * 2,
+    rate: rand(0.04, 0.16),               // rad/s: one breath every ~40-160s
+    depth: Math.random() < 0.3 ? rand(0.35, 0.6) : rand(0.1, 0.25),
+    s: pickColorIndex()
+  };
+}
+
+function setCount(n) {
+  n = Math.max(1, Math.round(n));
+  if (n < lights.length) {
+    lights.length = n;
+  } else {
+    while (lights.length < n) lights.push(makeLight());
+  }
+  lights.sort(function (a, b) { return a.layer - b.layer; }); // far first
+}
+
+// --- Animation loop ------------------------------------------------------
+var lastT = 0;
+
+function frame(t) {
+  requestAnimationFrame(frame); // loop keeps running; work is skipped when paused
+  if (!lastT) lastT = t;
+  var dt = Math.min((t - lastT) / 1000, 0.1);
+  lastT = t;
+  if (paused) return;
+
+  var W = canvas.width, H = canvas.height;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+  ctx.drawImage(bg, 0, 0);
+
+  ctx.globalCompositeOperation = "lighter"; // additive overlap glow
+  var aspect = H / W;
+  for (var i = 0; i < lights.length; i++) {
+    var q = lights[i];
+    q.x += q.vx * dt * speed;
+    q.y += q.vy * dt * speed;
+    q.phase += q.rate * dt; // breathing stays slow regardless of drift speed
+
+    var mx = q.r * aspect * 1.15, my = q.r * 1.15; // wrap margins
+    if (q.x < -mx) q.x = 1 + mx; else if (q.x > 1 + mx) q.x = -mx;
+    if (q.y < -my) q.y = 1 + my; else if (q.y > 1 + my) q.y = -my;
+
+    var breathe = 1 - q.depth * (0.5 + 0.5 * Math.sin(q.phase));
+    var rad = q.r * H;
+    ctx.globalAlpha = q.baseA * breathe;
+    ctx.drawImage(sprites[q.s], q.x * W - rad, q.y * H - rad, rad * 2, rad * 2);
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+}
+
+// --- Init ----------------------------------------------------------------
+buildPalette();
+buildSprites();
+resize();          // also builds the background
+setCount(count);
+requestAnimationFrame(frame);
+
+// --- GodlyPaper / Wallpaper Engine shim API ------------------------------
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.bokehcolor) {
+      userColor = weColor(props.bokehcolor.value);
+      buildPalette();
+      buildSprites();
+      buildBackground();
+    }
+    if (props.count) {
+      count = Math.round(Number(props.count.value));
+      setCount(count);
+    }
+    if (props.speed) speed = Number(props.speed.value);
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

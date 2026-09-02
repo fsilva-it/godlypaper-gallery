@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #050310; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// --- user properties (defaults match manifest.json) ---
+var speed = 1;
+var gridColor = { r: 255, g: 46, b: 143 };  // "1 0.18 0.56" hot pink
+var sunColor  = { r: 255, g: 140, b: 38 };  // "1 0.55 0.15" orange
+
+// --- animation state ---
+var paused = false;
+var gridPhase = 0;   // 0..1, one grid line of forward travel
+var sunPhase = 0;    // 0..1, one slice-gap of downward drift
+var lastT = 0;
+
+// --- layout (device pixels), recomputed on resize ---
+var W = 0, H = 0, dpr = 1;
+var horizonY = 0, vpX = 0;
+var sunR = 0, sunCx = 0, sunCy = 0, sunLeft = 0, sunTop = 0;
+
+// --- cached rendering (rebuilt on resize / color change) ---
+var bg = document.createElement("canvas");   // sky + stars + glows + horizon line
+var sun = document.createElement("canvas");  // full sun disc, sliced at draw time
+var gridGrad = null;                         // vertical fade for all grid lines
+
+function mix(a, b, t) {
+  return {
+    r: Math.round(a.r + (b.r - a.r) * t),
+    g: Math.round(a.g + (b.g - a.g) * t),
+    b: Math.round(a.b + (b.b - a.b) * t)
+  };
+}
+function css(c, a) { return "rgba(" + c.r + "," + c.g + "," + c.b + "," + a + ")"; }
+
+function layout() {
+  W = canvas.width;
+  H = canvas.height;
+  dpr = devicePixelRatio || 1;
+  horizonY = Math.round(H * 0.56);
+  vpX = W / 2;
+  sunR = Math.round(H * 0.21);
+  sunCx = vpX;
+  sunCy = horizonY - sunR * 0.7;   // bottom of disc dips just below the horizon
+  sunLeft = Math.round(sunCx - sunR);
+  sunTop = Math.round(sunCy - sunR);
+}
+
+function buildStatic() {
+  // --- background: sky gradient, stars, sun halo, horizon glow ---
+  bg.width = W;
+  bg.height = H;
+  var b = bg.getContext("2d");
+  var hf = horizonY / H;
+
+  var skyHorizon = mix({ r: 26, g: 12, b: 46 }, sunColor, 0.22);
+  var groundTop = mix({ r: 6, g: 4, b: 14 }, gridColor, 0.1);
+  var g = b.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "rgb(5,3,16)");
+  g.addColorStop(hf * 0.55, "rgb(16,8,38)");
+  g.addColorStop(hf, css(skyHorizon, 1));
+  g.addColorStop(Math.min(1, hf + 0.001), css(groundTop, 1));
+  g.addColorStop(1, "rgb(2,1,6)");
+  b.fillStyle = g;
+  b.fillRect(0, 0, W, H);
+
+  // stars: sparse, baked (motion comes from the grid and sun slices)
+  var starCount = Math.round(150 * (W * H) / (2560 * 1440 * dpr * dpr)) || 60;
+  for (var i = 0; i < starCount; i++) {
+    var sx = Math.random() * W;
+    var sy = Math.random() * (horizonY - H * 0.04);
+    var sa = 0.15 + Math.random() * 0.6 * (1 - sy / horizonY); // dimmer near horizon
+    b.fillStyle = "rgba(220,225,255," + sa.toFixed(3) + ")";
+    var ss = (0.5 + Math.random()) * dpr;
+    b.fillRect(sx, sy, ss, ss);
+  }
+
+  // soft warm halo behind the sun, clipped to the sky
+  b.save();
+  b.beginPath();
+  b.rect(0, 0, W, horizonY);
+  b.clip();
+  var halo = b.createRadialGradient(sunCx, sunCy, sunR * 0.5, sunCx, sunCy, sunR * 2.3);
+  halo.addColorStop(0, css(sunColor, 0.3));
+  halo.addColorStop(1, css(sunColor, 0));
+  b.fillStyle = halo;
+  b.fillRect(sunCx - sunR * 2.3, sunCy - sunR * 2.3, sunR * 4.6, sunR * 4.6);
+  b.restore();
+
+  // horizon glow band + crisp neon line in the grid color
+  var band = b.createLinearGradient(0, horizonY - H * 0.06, 0, horizonY + H * 0.03);
+  band.addColorStop(0, css(gridColor, 0));
+  band.addColorStop(0.66, css(gridColor, 0.22));
+  band.addColorStop(1, css(gridColor, 0));
+  b.fillStyle = band;
+  b.fillRect(0, horizonY - H * 0.06, W, H * 0.09);
+  b.fillStyle = css(gridColor, 0.8);
+  b.fillRect(0, horizonY - dpr, W, 2 * dpr);
+
+  // --- sun disc: vertical gradient, warm top to deep magenta bottom ---
+  var d = sunR * 2;
+  sun.width = d;
+  sun.height = d;
+  var s = sun.getContext("2d");
+  var sg = s.createLinearGradient(0, 0, 0, d);
+  sg.addColorStop(0, css(mix(sunColor, { r: 255, g: 236, b: 170 }, 0.5), 1));
+  sg.addColorStop(0.55, css(sunColor, 1));
+  sg.addColorStop(1, css(mix(sunColor, { r: 190, g: 30, b: 110 }, 0.55), 1));
+  s.fillStyle = sg;
+  s.beginPath();
+  s.arc(sunR, sunR, sunR, 0, 7);
+  s.fill();
+
+  // --- grid stroke gradient: transparent at the horizon, bright at the bottom ---
+  gridGrad = ctx.createLinearGradient(0, horizonY, 0, H);
+  gridGrad.addColorStop(0, css(gridColor, 0));
+  gridGrad.addColorStop(0.18, css(gridColor, 0.35));
+  gridGrad.addColorStop(1, css(gridColor, 0.9));
+}
+
+function resize() {
+  canvas.width = innerWidth * devicePixelRatio;
+  canvas.height = innerHeight * devicePixelRatio;
+  layout();
+  buildStatic();
+}
+addEventListener("resize", resize);
+resize();
+
+function drawSun() {
+  var d = sunR * 2;
+  var visBottom = Math.min(d, horizonY - sunTop); // clip disc at the horizon
+  if (visBottom <= 0) return;
+
+  // Horizontal slice gaps below the disc's midline. Uniform spacing with an
+  // animated offset; gap thickness grows with depth, so a gap fades in thin at
+  // the top of the cut region and wraps out at its thickest — no popping.
+  var cutStart = sunR * 0.95;
+  var region = d - cutStart;
+  var spacing = sunR * 0.18;
+  var maxTh = spacing * 0.6;
+  var y = 0;
+  for (var gy = cutStart + sunPhase * spacing; gy < d; gy += spacing) {
+    var th = maxTh * (gy - cutStart) / region;
+    var gTop = Math.min(gy - th / 2, visBottom);
+    if (gTop - y > 0.5) ctx.drawImage(sun, 0, y, d, gTop - y, sunLeft, sunTop + y, d, gTop - y);
+    y = gy + th / 2;
+    if (y >= visBottom) return;
+  }
+  if (visBottom - y > 0.5) ctx.drawImage(sun, 0, y, d, visBottom - y, sunLeft, sunTop + y, d, visBottom - y);
+}
+
+function drawGrid() {
+  var depth = H - horizonY;
+  ctx.strokeStyle = gridGrad;
+  ctx.lineWidth = 1.1 * dpr;
+  ctx.beginPath();
+
+  // vertical fan through the vanishing point
+  var spread = W * 0.085;
+  var jMax = Math.ceil(W * 0.5 / spread) + 2;
+  for (var j = -jMax; j <= jMax; j++) {
+    ctx.moveTo(vpX, horizonY);
+    ctx.lineTo(vpX + j * spread * 1.9, H);
+  }
+
+  // far horizontal lines (z >= 5), batched into the same thin stroke
+  for (var i = 1; i <= 26; i++) {
+    var z = i - gridPhase;
+    if (z < 5) continue;
+    var fy = horizonY + depth / z;
+    ctx.moveTo(0, fy);
+    ctx.lineTo(W, fy);
+  }
+  ctx.stroke();
+
+  // near horizontal lines: thicker as they approach the viewer
+  for (var k = 1; k <= 5; k++) {
+    var nz = k - gridPhase;
+    if (nz < 0.05) continue;
+    var ny = horizonY + depth / nz;
+    if (ny > H + 4 * dpr) continue;
+    ctx.lineWidth = Math.min(4, 0.9 + 2.6 / nz) * dpr;
+    ctx.beginPath();
+    ctx.moveTo(0, ny);
+    ctx.lineTo(W, ny);
+    ctx.stroke();
+  }
+}
+
+function frame(t) {
+  if (!paused) {
+    var dt = Math.min(0.1, Math.max(0, (t - lastT) / 1000));
+    gridPhase = (gridPhase + dt * 0.45 * speed) % 1;
+    sunPhase = (sunPhase + dt * 0.06 * speed) % 1;
+    ctx.drawImage(bg, 0, 0);
+    drawSun();
+    drawGrid();
+  }
+  lastT = t;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.gridcolor) { gridColor = weColor(props.gridcolor.value); buildStatic(); }
+    if (props.suncolor) { sunColor = weColor(props.suncolor.value); buildStatic(); }
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

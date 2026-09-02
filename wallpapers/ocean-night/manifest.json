@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "ocean-night",
+  "version": "1.0.0",
+  "type": "web",
+  "title": "Ocean Night",
+  "author": { "name": "GodlyPaper", "url": "https://github.com/godlypaper" },
+  "license": "CC0-1.0",
+  "entry": "index.html",
+  "preview": "preview.jpg",
+  "tags": ["ocean", "night", "moon", "calm"],
+  "contentRating": "everyone",
+  "web": { "allowNetwork": false },
+  "properties": {
+    "wavecolor": { "type": "color",  "label": "Wave color", "order": 0, "default": "0.1 0.22 0.42" },
+    "speed":     { "type": "slider", "label": "Speed",      "order": 1, "default": 1, "min": 0.2, "max": 3, "step": 0.1 },
+    "moon":      { "type": "bool",   "label": "Moon",       "order": 2, "default": true }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "game-of-life",
+  "version": "1.0.0",
+  "type": "web",
+  "title": "Game of Life",
+  "author": { "name": "GodlyPaper", "url": "https://github.com/godlypaper" },
+  "license": "CC0-1.0",
+  "entry": "index.html",
+  "preview": "preview.jpg",
+  "tags": ["cellular", "generative", "minimal"],
+  "contentRating": "everyone",
+  "web": { "allowNetwork": false },
+  "properties": {
+    "cellcolor": { "type": "color",  "label": "Cell color",   "order": 0, "default": "0.25 0.85 0.9" },
+    "tickrate":  { "type": "slider", "label": "Speed",        "order": 1, "default": 3,  "min": 1, "max": 10, "step": 0.5, "suffix": " gen/s" },
+    "density":   { "type": "slider", "label": "Seed density", "order": 2, "default": 18, "min": 5, "max": 40, "step": 1, "suffix": " %" }
+  }
+}

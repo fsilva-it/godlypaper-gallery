@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "gradient-flow",
+  "version": "1.0.0",
+  "type": "web",
+  "title": "Gradient Flow",
+  "author": { "name": "GodlyPaper", "url": "https://github.com/godlypaper" },
+  "license": "CC0-1.0",
+  "entry": "index.html",
+  "preview": "preview.jpg",
+  "tags": ["gradient", "abstract", "calm", "minimal"],
+  "contentRating": "everyone",
+  "web": { "allowNetwork": false },
+  "properties": {
+    "basecolor":   { "type": "color",  "label": "Base color",   "order": 0, "default": "0.10 0.09 0.30" },
+    "accentcolor": { "type": "color",  "label": "Accent color", "order": 1, "default": "0.75 0.17 0.50" },
+    "speed":       { "type": "slider", "label": "Drift speed",  "order": 2, "default": 1, "min": 0, "max": 3, "step": 0.05 }
+  }
+}

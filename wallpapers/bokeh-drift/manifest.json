@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "bokeh-drift",
+  "version": "1.0.0",
+  "type": "web",
+  "title": "Bokeh Drift",
+  "author": { "name": "GodlyPaper", "url": "https://github.com/godlypaper" },
+  "license": "CC0-1.0",
+  "entry": "index.html",
+  "preview": "preview.jpg",
+  "tags": ["bokeh", "lights", "ambient", "calm"],
+  "contentRating": "everyone",
+  "web": { "allowNetwork": false },
+  "properties": {
+    "bokehcolor": { "type": "color",  "label": "Light color",  "order": 0, "default": "1 0.72 0.35" },
+    "count":      { "type": "slider", "label": "Lights",       "order": 1, "default": 18, "min": 8,   "max": 40, "step": 1 },
+    "speed":      { "type": "slider", "label": "Drift speed",  "order": 2, "default": 1,  "min": 0.1, "max": 3,  "step": 0.1 }
+  }
+}

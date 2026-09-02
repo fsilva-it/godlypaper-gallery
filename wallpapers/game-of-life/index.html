@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05090c; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+
+// Conway's Game of Life — coarse grid of soft dots, age-tinted, gentle fades.
+// Grid steps at a slow tick; per-frame work is just fade easing + sprite blits.
+
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// ---- Tunables / user properties -------------------------------------------
+var CELL_CSS = 14;        // cell size in CSS px
+var RAMP     = 24;        // number of pre-rendered age-tint sprites
+var AGE_SPAN = 28;        // generations from "young" tone to "old" tone
+var BG       = "#05090c";
+
+var color   = { r: 64, g: 217, b: 230 }; // cellcolor default (cyan)
+var tick    = 3;                          // generations per second
+var density = 18;                         // initial fill %
+
+// ---- State ----------------------------------------------------------------
+var paused = false;
+var cols = 0, rows = 0, total = 0;
+var cellPx = 0;                 // cell size in device px
+var alive, next, age, fade;     // typed arrays, one entry per cell
+var posX, posY;                 // precomputed blit coords per cell
+var active, activeLen = 0;      // indices of cells that are alive or fading
+var sprites = [];               // RAMP soft-dot sprites, young -> old tone
+var spriteSize = 0, spriteHalf = 0;
+
+// Stagnation detection
+var h1 = 0, h2 = 0, stagnant = 0, lowPop = 0;
+
+// Timing
+var acc = 0, last = 0;
+
+// ---- Helpers --------------------------------------------------------------
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+function mix(a, b, t) {
+  return Math.round(a + (b - a) * t);
+}
+
+// Pre-render one soft rounded dot per age step so the frame loop only blits.
+function buildSprites() {
+  sprites.length = 0;
+  var r = cellPx * 0.36;
+  spriteSize = Math.ceil(r * 2) + 4;
+  spriteHalf = spriteSize / 2;
+  for (var k = 0; k < RAMP; k++) {
+    var t = k / (RAMP - 1);
+    // Two-tone gradient by age: newborn = lifted toward white, old = deep dim tone.
+    var yr = mix(color.r, 255, 0.55), yg = mix(color.g, 255, 0.55), yb = mix(color.b, 255, 0.55);
+    var or_ = Math.round(color.r * 0.42), og = Math.round(color.g * 0.42), ob = Math.round(color.b * 0.42);
+    var cr = mix(yr, or_, t), cg = mix(yg, og, t), cb = mix(yb, ob, t);
+    var s = document.createElement("canvas");
+    s.width = spriteSize; s.height = spriteSize;
+    var sc = s.getContext("2d");
+    var g = sc.createRadialGradient(spriteHalf, spriteHalf, 0, spriteHalf, spriteHalf, r + 2);
+    g.addColorStop(0,    "rgba(" + cr + "," + cg + "," + cb + ",1)");
+    g.addColorStop(0.62, "rgba(" + cr + "," + cg + "," + cb + ",0.85)");
+    g.addColorStop(1,    "rgba(" + cr + "," + cg + "," + cb + ",0)");
+    sc.fillStyle = g;
+    sc.fillRect(0, 0, spriteSize, spriteSize);
+    sprites.push(s);
+  }
+}
+
+// Only alive or still-fading cells get touched per frame; the list is rebuilt
+// once per generation, which keeps the frame loop off the 20k+ empty cells.
+function rebuildActive() {
+  var n = 0;
+  for (var i = 0; i < total; i++) {
+    if (alive[i] || fade[i] > 0) active[n++] = i;
+  }
+  activeLen = n;
+}
+
+function seed() {
+  var p = density / 100;
+  for (var i = 0; i < total; i++) {
+    alive[i] = Math.random() < p ? 1 : 0;
+    age[i] = 0;
+    // fade[] is left as-is: old dots fade out, new ones fade in — smooth reseed.
+  }
+  h1 = 0; h2 = 0; stagnant = 0; lowPop = 0; acc = 0;
+  rebuildActive();
+}
+
+function resize() {
+  canvas.width  = innerWidth  * devicePixelRatio;
+  canvas.height = innerHeight * devicePixelRatio;
+  cellPx = CELL_CSS * devicePixelRatio;
+  cols = Math.ceil(canvas.width  / cellPx);
+  rows = Math.ceil(canvas.height / cellPx);
+  total = cols * rows;
+  alive  = new Uint8Array(total);
+  next   = new Uint8Array(total);
+  age    = new Uint16Array(total);
+  fade   = new Float32Array(total);
+  active = new Int32Array(total);
+  posX   = new Float32Array(total);
+  posY   = new Float32Array(total);
+  buildSprites();
+  var i = 0;
+  for (var y = 0; y < rows; y++) {
+    for (var x = 0; x < cols; x++, i++) {
+      posX[i] = x * cellPx + cellPx / 2 - spriteHalf;
+      posY[i] = y * cellPx + cellPx / 2 - spriteHalf;
+    }
+  }
+  seed();
+}
+addEventListener("resize", resize);
+resize();
+
+// ---- One generation (toroidal wrap) ---------------------------------------
+function step() {
+  var pop = 0, hash = 2166136261;
+  for (var y = 0; y < rows; y++) {
+    var ru = (y === 0 ? rows - 1 : y - 1) * cols;
+    var r0 = y * cols;
+    var rd = (y === rows - 1 ? 0 : y + 1) * cols;
+    for (var x = 0; x < cols; x++) {
+      var xl = x === 0 ? cols - 1 : x - 1;
+      var xr = x === cols - 1 ? 0 : x + 1;
+      var n = alive[ru + xl] + alive[ru + x] + alive[ru + xr] +
+              alive[r0 + xl] +                 alive[r0 + xr] +
+              alive[rd + xl] + alive[rd + x] + alive[rd + xr];
+      var i = r0 + x;
+      var a = alive[i];
+      var na = (n === 3 || (a === 1 && n === 2)) ? 1 : 0;
+      next[i] = na;
+      if (na) {
+        age[i] = a ? Math.min(age[i] + 1, 999) : 0; // newborn restarts the tint ramp
+        pop++;
+        hash = Math.imul(hash ^ i, 16777619);
+      }
+      // Dying cells keep their age so they fade out in their last tint.
+    }
+  }
+  var tmp = alive; alive = next; next = tmp;
+
+  // Reseed when the world has gone still (period-1/2 patterns) or nearly empty.
+  if (hash === h1 || hash === h2) stagnant++; else stagnant = 0;
+  h2 = h1; h1 = hash;
+  if (pop < total * 0.004) lowPop++; else lowPop = 0;
+  if (stagnant >= 36 || lowPop >= 12) seed();
+  else rebuildActive();
+}
+
+// ---- Frame loop ------------------------------------------------------------
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (paused) { last = now; return; }
+  if (!last) last = now;
+  var dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+
+  acc += dt;
+  var interval = 1 / tick;
+  var steps = 0;
+  while (acc >= interval && steps < 3) { step(); acc -= interval; steps++; }
+  if (acc > interval) acc = interval;
+
+  // Fade completes in ~2/3 of a generation, so births/deaths breathe, not blink.
+  var fr = Math.min(1, dt * tick * 1.5);
+  var scale = (RAMP - 1) / AGE_SPAN;
+
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (var k = 0; k < activeLen; k++) {
+    var i = active[k];
+    var f = fade[i];
+    if (alive[i]) {
+      if (f < 1) { f += fr; if (f > 1) f = 1; fade[i] = f; }
+    } else if (f > 0) {
+      f -= fr; if (f < 0) f = 0; fade[i] = f;
+    }
+    if (f > 0.02) {
+      var idx = age[i] >= AGE_SPAN ? RAMP - 1 : (age[i] * scale) | 0;
+      ctx.globalAlpha = f;
+      ctx.drawImage(sprites[idx], posX[i], posY[i]);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+requestAnimationFrame(frame);
+
+// ---- GodlyPaper / Wallpaper Engine property API ----------------------------
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.cellcolor) { color = weColor(props.cellcolor.value); buildSprites(); }
+    if (props.tickrate)  { tick = Math.max(0.5, Number(props.tickrate.value)); }
+    if (props.density)   { density = Math.round(Number(props.density.value)); seed(); }
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

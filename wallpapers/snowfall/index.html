@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b101a; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// --- User properties (defaults match manifest.json) ---
+var intensity = 220;   // total flake count
+var wind = 0.3;        // -2..2, horizontal drift
+var speed = 1;         // fall-speed multiplier
+var paused = false;
+
+// --- Parallax layers: far -> near. All units are CSS pixels. ---
+var LAYERS = [
+  { frac: 0.50, rMin: 0.6, rMax: 1.2, vMin: 14, vMax: 22, alpha: 0.35, amp:  5, windF: 0.35, swMin: 0.3, swMax: 0.6 },
+  { frac: 0.30, rMin: 1.3, rMax: 2.1, vMin: 26, vMax: 40, alpha: 0.60, amp:  9, windF: 0.65, swMin: 0.4, swMax: 0.8 },
+  { frac: 0.20, rMin: 2.2, rMax: 3.5, vMin: 44, vMax: 66, alpha: 0.92, amp: 14, windF: 1.00, swMin: 0.5, swMax: 1.0 }
+];
+var MARGIN = 24; // > max radius + max sway amplitude
+var TAU = Math.PI * 2;
+
+var W = 0, H = 0;          // CSS-pixel viewport size
+var layers = [];           // [layer][flake]
+var bgGradient = null;     // cached — rebuilt only on resize
+var simTime = 0;           // accumulated sim time (scales with speed)
+var lastT = 0;
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+function resize() {
+  var dpr = devicePixelRatio || 1;
+  W = innerWidth;
+  H = innerHeight;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
+
+  // Dark blue-grey night sky, cached once per resize.
+  bgGradient = ctx.createLinearGradient(0, 0, 0, H);
+  bgGradient.addColorStop(0.0, "#0b101a");
+  bgGradient.addColorStop(0.6, "#121a28");
+  bgGradient.addColorStop(1.0, "#1a2334");
+}
+
+function seed() {
+  layers = [];
+  for (var li = 0; li < LAYERS.length; li++) {
+    var L = LAYERS[li];
+    var n = Math.max(1, Math.round(intensity * L.frac));
+    var flakes = new Array(n);
+    for (var i = 0; i < n; i++) {
+      flakes[i] = {
+        x: rand(-MARGIN, W + MARGIN),
+        y: rand(-MARGIN, H + MARGIN),
+        r: rand(L.rMin, L.rMax),
+        vy: rand(L.vMin, L.vMax),
+        amp: L.amp * rand(0.6, 1.0),
+        swf: rand(L.swMin, L.swMax) * TAU / 6, // slow sway frequency (rad/s)
+        sph: rand(0, TAU)                       // sway phase
+      };
+    }
+    layers.push(flakes);
+  }
+}
+
+addEventListener("resize", function () { resize(); seed(); });
+resize();
+seed();
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (paused) { lastT = now; return; } // keep rAF alive, skip all work
+
+  var dt = Math.min((now - lastT) / 1000, 0.1) || 0;
+  lastT = now;
+  simTime += dt * speed;
+
+  ctx.fillStyle = bgGradient;
+  ctx.fillRect(0, 0, W, H);
+
+  var span = W + 2 * MARGIN;
+  for (var li = 0; li < layers.length; li++) {
+    var L = LAYERS[li];
+    var flakes = layers[li];
+    var windDrift = wind * 30 * L.windF * speed * dt;
+    var fall = speed * dt;
+
+    ctx.fillStyle = "rgba(226,236,248," + L.alpha + ")";
+    ctx.beginPath(); // one batched path per layer
+    for (var i = 0; i < flakes.length; i++) {
+      var f = flakes[i];
+      f.y += f.vy * fall;
+      f.x += windDrift;
+
+      if (f.y > H + MARGIN) { f.y = -MARGIN - rand(0, 30); f.x = rand(-MARGIN, W + MARGIN); }
+      if (f.x > W + MARGIN) f.x -= span;
+      else if (f.x < -MARGIN) f.x += span;
+
+      var px = f.x + Math.sin(simTime * f.swf + f.sph) * f.amp;
+      ctx.moveTo(px + f.r, f.y);
+      ctx.arc(px, f.y, f.r, 0, TAU);
+    }
+    ctx.fill();
+  }
+}
+requestAnimationFrame(frame);
+
+// WE-format "r g b" float string -> {r,g,b} 0..255 (kept for future color props)
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.intensity) { intensity = Math.round(Number(props.intensity.value)); seed(); }
+    if (props.wind) wind = Number(props.wind.value);
+    if (props.speed) speed = Number(props.speed.value);
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

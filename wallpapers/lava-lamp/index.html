@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0508; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// --- state (defaults mirror manifest.json) ---
+var color = { r: 242, g: 84, b: 102 };   // deep orange-pink ("0.95 0.33 0.4")
+var speed = 1;
+var blobCount = 6;
+var paused = false;
+var blobs = [];
+var t = 0;              // simulated seconds; only advances while unpaused
+var lastNow = 0;
+
+// --- cached render assets (rebuilt only on resize / color change) ---
+var sprite = document.createElement("canvas"); // soft blob, drawn once
+var bgGrad = null;                             // full-canvas vertical wash
+
+function tint(k, extra) {
+  return "rgb(" + Math.round(color.r * k + extra) + "," +
+                  Math.round(color.g * k + extra) + "," +
+                  Math.round(color.b * k + extra) + ")";
+}
+
+function buildSprite() {
+  var S = 256, half = S / 2;
+  sprite.width = S; sprite.height = S;
+  var sctx = sprite.getContext("2d");
+  sctx.clearRect(0, 0, S, S);
+  var g = sctx.createRadialGradient(half, half, 0, half, half, half);
+  var c = color.r + "," + color.g + "," + color.b;
+  g.addColorStop(0.00, "rgba(" + c + ",0.80)");
+  g.addColorStop(0.35, "rgba(" + c + ",0.52)");
+  g.addColorStop(0.70, "rgba(" + c + ",0.16)");
+  g.addColorStop(1.00, "rgba(" + c + ",0)");
+  sctx.fillStyle = g;
+  sctx.fillRect(0, 0, S, S);
+}
+
+function buildBackground() {
+  bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  bgGrad.addColorStop(0, tint(0.035, 3)); // near-black, faintly tinted top
+  bgGrad.addColorStop(1, tint(0.13, 5));  // dim warm glow at the base
+}
+
+function resize() {
+  canvas.width = innerWidth * devicePixelRatio;
+  canvas.height = innerHeight * devicePixelRatio;
+  buildBackground();
+}
+addEventListener("resize", resize);
+resize();
+buildSprite();
+
+// --- blobs: slow sinusoidal rise/fall + gentle drift + soft pulsing ---
+function makeBlob(i, n) {
+  return {
+    bx: 0.12 + 0.76 * ((i % n) + 0.5) / n + (Math.random() - 0.5) * 0.10,
+    rf: 0.09 + Math.random() * 0.07,          // radius as fraction of height
+    w1: 0.055 + Math.random() * 0.055,        // rise/fall (70-110s cycles)
+    p1: Math.random() * 6.283,
+    w2: 0.09 + Math.random() * 0.08,          // horizontal drift
+    p2: Math.random() * 6.283,
+    w3: 0.15 + Math.random() * 0.12,          // size "squish" pulse
+    p3: Math.random() * 6.283
+  };
+}
+
+function setCount(n) {
+  blobCount = n;
+  while (blobs.length > n) blobs.pop();
+  while (blobs.length < n) blobs.push(makeBlob(blobs.length, n));
+}
+setCount(blobCount);
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (paused) { lastNow = now; return; }        // loop alive, zero work
+  var dt = Math.min((now - lastNow) / 1000, 0.1);
+  lastNow = now;
+  t += dt * speed;
+
+  var w = canvas.width, h = canvas.height;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.globalCompositeOperation = "lighter";
+  for (var i = 0; i < blobs.length; i++) {
+    var b = blobs[i];
+    var r = b.rf * h * (1 + 0.07 * Math.sin(t * b.w3 + b.p3));
+    var x = (b.bx + 0.05 * Math.sin(t * b.w2 + b.p2)) * w;
+    var y = (0.5 + 0.40 * Math.sin(t * b.w1 + b.p1)) * h;
+    ctx.drawImage(sprite, x - r, y - r, r * 2, r * 2);
+  }
+}
+requestAnimationFrame(frame);
+
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.blobcolor) {
+      color = weColor(props.blobcolor.value);
+      buildSprite();
+      buildBackground();
+    }
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.blobcount) setCount(Math.round(Number(props.blobcount.value)));
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0921; }
+  canvas { display: block; position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="mesh"></canvas>
+<canvas id="grain"></canvas>
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// gradient-flow — mesh gradient of huge soft blobs drifting on Lissajous paths.
+//
+// Rendering strategy: the blobs are drawn on a tiny offscreen canvas
+// (~256x160) and upscaled to full resolution with image smoothing on.
+// The upscale is one GPU-accelerated drawImage, so per-frame cost stays far
+// below budget even at 2560x1600. A static grain overlay (repainted only on
+// resize) dithers away the banding an 8-bit upscale would otherwise show.
+// ---------------------------------------------------------------------------
+
+var meshCanvas = document.getElementById("mesh");
+var grainCanvas = document.getElementById("grain");
+var ctx = meshCanvas.getContext("2d");
+var grainCtx = grainCanvas.getContext("2d");
+
+// --- user properties (defaults MUST match manifest.json) -------------------
+var baseColor = { r: 25, g: 23, b: 77 };    // "0.10 0.09 0.30" deep indigo
+var accentColor = { r: 191, g: 43, b: 127 }; // "0.75 0.17 0.50" magenta
+var speed = 1;
+var paused = false;
+
+// --- blob choreography ------------------------------------------------------
+// Incommensurate Lissajous frequencies (rad/s) so the pattern never visibly
+// repeats. Amplitudes/radii are fractions of the offscreen width/height.
+// mix picks the blob's hue between base and accent; bright dims it so
+// additive overlaps stay rich instead of blowing out to white.
+var BLOBS = [
+  { fx: 0.021, fy: 0.034, px: 0.0, py: 1.7, ax: 0.38, ay: 0.30, r: 0.56, mix: 0.05, bright: 1.00 },
+  { fx: 0.033, fy: 0.022, px: 2.1, py: 0.4, ax: 0.42, ay: 0.34, r: 0.62, mix: 0.35, bright: 0.85 },
+  { fx: 0.016, fy: 0.028, px: 4.2, py: 2.9, ax: 0.36, ay: 0.38, r: 0.50, mix: 0.65, bright: 0.95 },
+  { fx: 0.027, fy: 0.018, px: 1.1, py: 5.0, ax: 0.44, ay: 0.28, r: 0.58, mix: 0.92, bright: 1.00 },
+  { fx: 0.012, fy: 0.024, px: 3.3, py: 3.8, ax: 0.30, ay: 0.42, r: 0.70, mix: 0.50, bright: 0.65 }
+];
+var SPRITE_SIZE = 256;
+var OS_HEIGHT = 160; // offscreen render height; width follows aspect ratio
+
+var offscreen = document.createElement("canvas");
+var osCtx = offscreen.getContext("2d");
+var sprites = [];       // one pre-rendered radial-gradient sprite per blob
+var bgStyle = "#000";
+var time = 0;           // seconds of animation elapsed (scaled by speed)
+var lastTs = -1;
+
+function clamp255(v) { return v < 0 ? 0 : v > 255 ? 255 : Math.round(v); }
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Pre-render each blob as a small sprite with a smooth (gaussian-ish)
+// radial falloff. Only re-run when a color property changes.
+function buildPalette() {
+  // Lift the base color so blobs read as luminous versions of it.
+  var lifted = {
+    r: clamp255(baseColor.r * 1.9 + 26),
+    g: clamp255(baseColor.g * 1.9 + 22),
+    b: clamp255(baseColor.b * 1.9 + 34)
+  };
+  sprites = [];
+  for (var i = 0; i < BLOBS.length; i++) {
+    var b = BLOBS[i];
+    var r = clamp255(lerp(lifted.r, accentColor.r, b.mix) * b.bright);
+    var g = clamp255(lerp(lifted.g, accentColor.g, b.mix) * b.bright);
+    var bl = clamp255(lerp(lifted.b, accentColor.b, b.mix) * b.bright);
+    var s = document.createElement("canvas");
+    s.width = SPRITE_SIZE;
+    s.height = SPRITE_SIZE;
+    var sc = s.getContext("2d");
+    var half = SPRITE_SIZE / 2;
+    var grad = sc.createRadialGradient(half, half, 0, half, half, half);
+    var rgb = r + "," + g + "," + bl;
+    grad.addColorStop(0.00, "rgba(" + rgb + ",0.55)");
+    grad.addColorStop(0.30, "rgba(" + rgb + ",0.42)");
+    grad.addColorStop(0.60, "rgba(" + rgb + ",0.19)");
+    grad.addColorStop(0.85, "rgba(" + rgb + ",0.05)");
+    grad.addColorStop(1.00, "rgba(" + rgb + ",0)");
+    sc.fillStyle = grad;
+    sc.fillRect(0, 0, SPRITE_SIZE, SPRITE_SIZE);
+    sprites.push(s);
+  }
+  // Background is a much darker take on the base color.
+  bgStyle = "rgb(" +
+    clamp255(baseColor.r * 0.38) + "," +
+    clamp255(baseColor.g * 0.38) + "," +
+    clamp255(baseColor.b * 0.42) + ")";
+  document.body.style.background = bgStyle;
+}
+
+// Static grain overlay: a small random tile pattern-filled once per resize.
+// It never animates, so it costs nothing per frame, but its dithering hides
+// the banding of the low-res gradient upscale.
+var grainTile = null;
+function buildGrainTile() {
+  grainTile = document.createElement("canvas");
+  grainTile.width = 128;
+  grainTile.height = 128;
+  var gc = grainTile.getContext("2d");
+  var img = gc.createImageData(128, 128);
+  var d = img.data;
+  for (var i = 0; i < d.length; i += 4) {
+    var v = (Math.random() * 255) | 0;
+    d[i] = v; d[i + 1] = v; d[i + 2] = v;
+    d[i + 3] = (Math.random() * 12) | 0; // very faint
+  }
+  gc.putImageData(img, 0, 0);
+}
+buildGrainTile();
+
+function paintGrain() {
+  grainCtx.clearRect(0, 0, grainCanvas.width, grainCanvas.height);
+  grainCtx.fillStyle = grainCtx.createPattern(grainTile, "repeat");
+  grainCtx.fillRect(0, 0, grainCanvas.width, grainCanvas.height);
+}
+
+function resize() {
+  var dpr = devicePixelRatio || 1;
+  var w = Math.max(1, Math.round(innerWidth * dpr));
+  var h = Math.max(1, Math.round(innerHeight * dpr));
+  meshCanvas.width = w;
+  meshCanvas.height = h;
+  grainCanvas.width = w;
+  grainCanvas.height = h;
+  offscreen.height = OS_HEIGHT;
+  offscreen.width = Math.max(2, Math.round(OS_HEIGHT * (w / h)));
+  ctx.imageSmoothingEnabled = true;
+  paintGrain();
+  drawMesh(); // repaint immediately so resizes never flash the bare background
+}
+addEventListener("resize", resize);
+
+function drawMesh() {
+  var ow = offscreen.width, oh = offscreen.height;
+  osCtx.globalCompositeOperation = "source-over";
+  osCtx.fillStyle = bgStyle;
+  osCtx.fillRect(0, 0, ow, oh);
+  osCtx.globalCompositeOperation = "lighter";
+  for (var i = 0; i < BLOBS.length; i++) {
+    var b = BLOBS[i];
+    var cx = ow * (0.5 + b.ax * Math.sin(b.fx * time + b.px));
+    var cy = oh * (0.5 + b.ay * Math.sin(b.fy * time + b.py));
+    var radius = b.r * ow; // ~half the screen width
+    osCtx.drawImage(sprites[i], cx - radius, cy - radius, radius * 2, radius * 2);
+  }
+  ctx.drawImage(offscreen, 0, 0, meshCanvas.width, meshCanvas.height);
+}
+
+function frame(ts) {
+  if (paused) {
+    // Keep the rAF loop alive but do zero work; resync the clock so motion
+    // does not jump when the wallpaper wakes up again.
+    lastTs = ts;
+    requestAnimationFrame(frame);
+    return;
+  }
+  if (lastTs < 0) lastTs = ts;
+  var dt = Math.min(100, ts - lastTs); // clamp hiccups (tab throttling etc.)
+  lastTs = ts;
+  time += (dt / 1000) * speed;
+  drawMesh();
+  requestAnimationFrame(frame);
+}
+
+// Desynchronize the start pose so the wallpaper never opens with all blobs
+// at their phase origin.
+time = 400 + Math.random() * 800;
+buildPalette();
+resize();
+requestAnimationFrame(frame);
+
+// WE-format color: "r g b" float string, e.g. "0.75 0.17 0.50".
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    var repaint = false;
+    if (props.basecolor) { baseColor = weColor(props.basecolor.value); repaint = true; }
+    if (props.accentcolor) { accentColor = weColor(props.accentcolor.value); repaint = true; }
+    if (props.speed) speed = Number(props.speed.value);
+    if (repaint) {
+      buildPalette();
+      drawMesh(); // reflect new colors even while paused or speed is 0
+    }
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

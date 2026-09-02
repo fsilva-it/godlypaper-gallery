@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// Matrix digital rain — bright glyph heads, trails fade via translucent
+// black overlay. All timing is wall-clock based so the fall stays slow
+// and consistent regardless of display refresh rate.
+
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// --- User properties (defaults mirror manifest.json) ---------------------
+var speed = 1;                       // time multiplier
+var density = 0.5;                   // fraction of columns with an active stream
+var color = { r: 51, g: 255, b: 102 }; // "0.2 1 0.4" classic green
+
+// --- Tunables ------------------------------------------------------------
+var FONT_PX = 16;        // glyph size in CSS pixels
+var FADE_MS = 90;        // ms of scaled time between fade passes
+var FADE_STYLE = "rgba(0,0,0,0.16)"; // per-pass trail decay (leaves no visible residue)
+var STEP_MIN = 110;      // per-column ms between row steps (scaled by speed)
+var STEP_VAR = 130;
+
+// Glyph set: half-width katakana + digits + a few latin caps.
+var CHARS = (function () {
+  var s = "";
+  for (var i = 0xFF66; i <= 0xFF9D; i++) s += String.fromCharCode(i);
+  s += "0123456789Z:=*+-<>";
+  return s;
+})();
+
+// --- State ---------------------------------------------------------------
+var paused = false;
+var streams = [];        // active columns: { x, row, t, interval, ch }
+var cell = FONT_PX;      // row height in device pixels
+var totalCols = 0;
+var fadeAcc = 0;
+var lastTs = 0;
+var baseStyle = "", headStyle = "";
+
+function buildStyles() {
+  baseStyle = "rgb(" + color.r + "," + color.g + "," + color.b + ")";
+  // Head glyph: rain color pushed most of the way to white.
+  var hr = Math.round(color.r + (255 - color.r) * 0.7);
+  var hg = Math.round(color.g + (255 - color.g) * 0.7);
+  var hb = Math.round(color.b + (255 - color.b) * 0.7);
+  headStyle = "rgb(" + hr + "," + hg + "," + hb + ")";
+}
+buildStyles();
+
+function randInterval() {
+  return STEP_MIN + Math.random() * STEP_VAR;
+}
+
+function seed() {
+  var count = Math.max(1, Math.round(totalCols * density));
+  // Shuffle column indices so the active subset is evenly scattered.
+  var idx = [];
+  for (var i = 0; i < totalCols; i++) idx.push(i);
+  for (i = idx.length - 1; i > 0; i--) {
+    var j = (Math.random() * (i + 1)) | 0;
+    var tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+  }
+  streams = [];
+  for (i = 0; i < count; i++) {
+    streams.push({
+      x: (idx[i] + 0.5) * cell,                 // column center (device px)
+      row: -((Math.random() * 60) | 0),          // start staggered above screen
+      t: Math.random() * STEP_MIN,
+      interval: randInterval(),
+      ch: ""
+    });
+  }
+}
+
+function resize() {
+  var dpr = devicePixelRatio || 1;
+  canvas.width = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  cell = Math.max(4, Math.round(FONT_PX * dpr));
+  totalCols = Math.max(1, Math.floor(canvas.width / cell));
+  // Canvas size change resets 2D state — restore font settings.
+  ctx.font = cell + 'px "Menlo", "Consolas", "Courier New", monospace';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  seed();
+}
+addEventListener("resize", resize);
+resize();
+
+function step(s) {
+  // Repaint the old head in the trail color (the fade overlay dims it from here).
+  var y = s.row * cell;
+  if (s.row >= 0 && y < canvas.height) {
+    ctx.fillStyle = baseStyle;
+    ctx.fillText(s.ch, s.x, y);
+  }
+  s.row++;
+  y = s.row * cell;
+  if (y > canvas.height) {
+    // Recycle: restart above the screen after a random gap, new pace.
+    s.row = -(1 + ((Math.random() * 50) | 0));
+    s.interval = randInterval();
+    return;
+  }
+  if (s.row >= 0) {
+    s.ch = CHARS.charAt((Math.random() * CHARS.length) | 0);
+    ctx.fillStyle = headStyle;
+    ctx.fillText(s.ch, s.x, y);
+  }
+}
+
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (paused) { lastTs = ts; return; }        // rAF keeps running; work stops
+  var dt = Math.min(100, ts - lastTs) * speed; // clamp throttled/hidden gaps
+  lastTs = ts;
+
+  // Trail fade, decoupled from refresh rate so trail length tracks speed.
+  fadeAcc += dt;
+  var passes = 0;
+  while (fadeAcc >= FADE_MS && passes < 4) {
+    ctx.fillStyle = FADE_STYLE;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    fadeAcc -= FADE_MS;
+    passes++;
+  }
+  if (passes === 4) fadeAcc = 0;
+
+  for (var i = 0; i < streams.length; i++) {
+    var s = streams[i];
+    s.t += dt;
+    var n = 0;
+    while (s.t >= s.interval && n < 4) {       // cap catch-up bursts
+      step(s);
+      s.t -= s.interval;
+      n++;
+    }
+    if (n === 4) s.t = 0;
+  }
+}
+requestAnimationFrame(frame);
+
+// --- GodlyPaper / Wallpaper Engine shim API ------------------------------
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.raincolor) { color = weColor(props.raincolor.value); buildStyles(); }
+    if (props.density) {
+      density = Number(props.density.value);
+      seed(); // old trails fade out on their own; new streams take over
+    }
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

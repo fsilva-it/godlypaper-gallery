@@ -26,7 +26,7 @@ jobs:
           # them to this repo's rolling "wallpapers" release, rewrites URLs,
           # builds index.json + previews into site/.
           node scripts/rehost-assets.mjs
-          bash scripts/build-dist.sh "https://godlypaper.github.io/gallery"
+          bash scripts/build-dist.sh "https://fsilva-it.github.io/godlypaper-gallery"
           mkdir -p site/packages site/previews
           cp dist/*.godlypaper site/packages/ 2>/dev/null || true
           cp previews/*.jpg site/previews/ 2>/dev/null || true

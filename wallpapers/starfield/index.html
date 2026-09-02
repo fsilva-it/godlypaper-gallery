@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+var speed = 1, density = 400, color = { r: 255, g: 255, b: 255 };
+var paused = false, stars = [];
+
+function resize() {
+  canvas.width = innerWidth * devicePixelRatio;
+  canvas.height = innerHeight * devicePixelRatio;
+}
+addEventListener("resize", function () { resize(); seed(); });
+resize();
+
+function seed() {
+  stars = [];
+  for (var i = 0; i < density; i++) {
+    stars.push({
+      x: (Math.random() - 0.5) * canvas.width,
+      y: (Math.random() - 0.5) * canvas.height,
+      z: Math.random() * canvas.width
+    });
+  }
+}
+seed();
+
+function frame() {
+  if (!paused) {
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    var cx = canvas.width / 2, cy = canvas.height / 2;
+    for (var i = 0; i < stars.length; i++) {
+      var s = stars[i];
+      s.z -= 2.5 * speed;
+      if (s.z <= 1) {
+        s.x = (Math.random() - 0.5) * canvas.width;
+        s.y = (Math.random() - 0.5) * canvas.height;
+        s.z = canvas.width;
+      }
+      var k = 128 / s.z;
+      var px = s.x * k + cx, py = s.y * k + cy;
+      if (px < 0 || px >= canvas.width || py < 0 || py >= canvas.height) continue;
+      var size = Math.max(0.5, (1 - s.z / canvas.width) * 3.5) * devicePixelRatio;
+      var alpha = Math.min(1, (1 - s.z / canvas.width) * 1.4);
+      ctx.fillStyle = "rgba(" + color.r + "," + color.g + "," + color.b + "," + alpha + ")";
+      ctx.beginPath();
+      ctx.arc(px, py, size, 0, 7);
+      ctx.fill();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+frame();
+
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.density) { density = Math.round(Number(props.density.value)); seed(); }
+    if (props.starcolor) color = weColor(props.starcolor.value);
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

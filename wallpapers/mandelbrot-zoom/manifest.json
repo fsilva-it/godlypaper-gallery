@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "mandelbrot-zoom",
+  "version": "1.0.0",
+  "type": "video",
+  "title": "Mandelbrot Zoom",
+  "author": { "name": "GodlyPaper", "url": "https://github.com/godlypaper" },
+  "license": "CC0-1.0",
+  "entry": "mandelbrot.mp4",
+  "preview": "preview.jpg",
+  "fit": "fill",
+  "tags": ["fractal", "math", "hypnotic"],
+  "contentRating": "everyone",
+  "video": { "muted": true }
+}

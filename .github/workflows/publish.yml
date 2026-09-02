@@ -1,0 +1,45 @@
+name: Publish gallery
+
+on:
+  push:
+    branches: [main]
+    paths: ["wallpapers/**", "scripts/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Re-host packages and build site
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Downloads submitter-hosted packages, re-verifies sha256, uploads
+          # them to this repo's rolling "wallpapers" release, rewrites URLs,
+          # builds index.json + previews into site/.
+          node scripts/rehost-assets.mjs
+          bash scripts/build-dist.sh "https://godlypaper.github.io/gallery"
+          mkdir -p site/packages site/previews
+          cp dist/*.godlypaper site/packages/ 2>/dev/null || true
+          cp previews/*.jpg site/previews/ 2>/dev/null || true
+          cp index.json site/
+      - name: Commit re-hosted package URLs
+        run: |
+          if ! git diff --quiet -- wallpapers; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add wallpapers/*/entry.json
+            git commit -m "Point re-hosted packages at the wallpapers release"
+            git push
+          fi
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+      - uses: actions/deploy-pages@v4

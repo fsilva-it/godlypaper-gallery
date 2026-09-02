@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060f; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+var speed = 1, waves = 5, color = { r: 64, g: 220, b: 255 };
+var paused = false, t = 0;
+
+function resize() {
+  canvas.width = innerWidth * devicePixelRatio;
+  canvas.height = innerHeight * devicePixelRatio;
+}
+addEventListener("resize", resize);
+resize();
+
+function frame() {
+  if (!paused) {
+    t += 0.008 * speed;
+    ctx.fillStyle = "#05060f";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    var w = canvas.width, h = canvas.height;
+    for (var i = 0; i < waves; i++) {
+      var phase = t + i * 0.9;
+      var amp = h * (0.06 + 0.03 * i);
+      var mid = h * (0.25 + (i + 1) / (waves + 2) * 0.5);
+      var alpha = 0.25 + 0.5 * (i / Math.max(1, waves - 1));
+      ctx.strokeStyle = "rgba(" + color.r + "," + color.g + "," + color.b + "," + alpha + ")";
+      ctx.lineWidth = 2.5 * devicePixelRatio;
+      ctx.shadowColor = "rgba(" + color.r + "," + color.g + "," + color.b + ",0.8)";
+      ctx.shadowBlur = 18 * devicePixelRatio;
+      ctx.beginPath();
+      for (var x = 0; x <= w; x += 6) {
+        var y = mid
+          + Math.sin(x / w * 4 * Math.PI + phase) * amp
+          + Math.sin(x / w * 9 * Math.PI - phase * 1.7) * amp * 0.35;
+        if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+  }
+  requestAnimationFrame(frame);
+}
+frame();
+
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.wavecount) waves = Math.round(Number(props.wavecount.value));
+    if (props.wavecolor) color = weColor(props.wavecolor.value);
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "aurora-drift",
+  "version": "1.0.0",
+  "type": "video",
+  "title": "Aurora Drift",
+  "author": { "name": "GodlyPaper", "url": "https://github.com/godlypaper" },
+  "license": "CC0-1.0",
+  "entry": "aurora.mp4",
+  "preview": "preview.jpg",
+  "fit": "fill",
+  "tags": ["abstract", "gradient", "calm"],
+  "contentRating": "everyone",
+  "video": { "muted": true }
+}

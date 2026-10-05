@@ -22,4 +22,18 @@ Rules: `contentRating: everyone`, real SPDX license, no ripped content — see
 ## Seed wallpapers
 
 `wallpapers/*/` folders carrying content directly (instead of `entry.json`)
-are first-party CC0 seeds, packaged by CI at publish time.
+are first-party seeds, packaged by CI at publish time. Most are CC0; the
+"art scene" seeds use CC BY 4.0 paintings by David Revoy — see each folder's
+`CREDITS.txt`.
+
+## Art scenes (still illustration + animated overlays)
+
+`templates/art-scene/` shows a high-res still 1:1 in device pixels (no runtime
+resampling, so it stays as sharp as the source) with cheap overlays: rain,
+petals, fireflies, snow, light dust, mist, light pulse, vignette — all
+adjustable in the app. Build one from any image:
+
+    python3 scripts/make-art-scene.py art.png --title "Rain City" --effect rain --install
+
+`--size` defaults to the main display's backing resolution; `--install` drops
+it straight into the local library (quit GodlyPaper first).

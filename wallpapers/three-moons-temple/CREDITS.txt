@@ -1,0 +1,6 @@
+Artwork: Copyright © David Revoy 2026, www.peppercarrot.com
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+         https://creativecommons.org/licenses/by/4.0/
+Source:  https://www.peppercarrot.com/0_sources/0ther/wallpapers/hi-res/2021-12-15_Episode-36-The-temple-of-Ah_by-David-Revoy.jpg
+Changes: fill-cropped and resized to 3360x2100; animated overlays added
+         (templates/art-scene, CC0).

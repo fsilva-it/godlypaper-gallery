@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "id": "three-moons-temple",
+  "version": "1.0.0",
+  "type": "web",
+  "title": "Three Moons Temple",
+  "author": {
+    "name": "David Revoy",
+    "url": "https://www.peppercarrot.com"
+  },
+  "license": "CC-BY-4.0",
+  "entry": "index.html",
+  "preview": "preview.jpg",
+  "tags": [
+    "illustration",
+    "painted",
+    "peppercarrot",
+    "art-scene"
+  ],
+  "contentRating": "everyone",
+  "web": {
+    "allowNetwork": false
+  },
+  "properties": {
+    "effect": {
+      "type": "choice",
+      "label": "Effect",
+      "order": 0,
+      "default": "fireflies",
+      "options": [
+        {
+          "label": "None",
+          "value": "none"
+        },
+        {
+          "label": "Rain",
+          "value": "rain"
+        },
+        {
+          "label": "Petals",
+          "value": "petals"
+        },
+        {
+          "label": "Fireflies",
+          "value": "fireflies"
+        },
+        {
+          "label": "Snow",
+          "value": "snow"
+        },
+        {
+          "label": "Dust",
+          "value": "dust"
+        }
+      ]
+    },
+    "density": {
+      "type": "slider",
+      "label": "Density",
+      "order": 1,
+      "default": 1,
+      "min": 0.2,
+      "max": 2,
+      "step": 0.05
+    },
+    "speed": {
+      "type": "slider",
+      "label": "Speed",
+      "order": 2,
+      "default": 1,
+      "min": 0.2,
+      "max": 2.5,
+      "step": 0.05
+    },
+    "particlecolor": {
+      "type": "color",
+      "label": "Particle color",
+      "order": 3,
+      "default": "1 0.88 0.45"
+    },
+    "fog": {
+      "type": "slider",
+      "label": "Mist",
+      "order": 4,
+      "default": 0.0,
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "glow": {
+      "type": "slider",
+      "label": "Light pulse",
+      "order": 5,
+      "default": 0.2,
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "glowcolor": {
+      "type": "color",
+      "label": "Light color",
+      "order": 6,
+      "default": "0.55 0.7 1"
+    },
+    "vignette": {
+      "type": "slider",
+      "label": "Vignette",
+      "order": 7,
+      "default": 0.35,
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "drift": {
+      "type": "bool",
+      "label": "Camera drift (slightly softer)",
+      "order": 8,
+      "default": false
+    }
+  }
+}

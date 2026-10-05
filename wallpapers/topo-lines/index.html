@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05080a; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// Topo Lines — a slowly morphing topographic contour map.
+// A 3D simplex-noise height field (x, y, time) is sampled on a grid and
+// contoured with marching squares. Noise is the expensive part, so it is
+// only sampled at keyframes 1 simulated second apart — the next keyframe is
+// built a few rows per frame — and each frame lerps between two keyframes.
+// Each cell only visits the iso-levels between its min and max corner, so
+// contouring scales with cells, not cells x levels. Redraws are capped at
+// 30 fps: the terrain moves slowly enough that more is wasted work.
+
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// --- state (defaults mirror manifest.json) ---
+var color = { r: 115, g: 230, b: 204 };   // "0.45 0.9 0.8" pale mint
+var speed = 1;
+var lineCount = 18;
+var paused = false;
+var t = 0;              // simulated seconds; only advances while unpaused
+var lastNow = 0;
+var acc = 0;            // time since the last redraw
+var STEP = 1 / 30;
+
+// --- simplex noise 3D (Gustavson), seeded so the map is stable ---
+var perm = new Uint8Array(512), permMod12 = new Uint8Array(512);
+(function seed(s) {
+  var p = new Uint8Array(256), i;
+  for (i = 0; i < 256; i++) p[i] = i;
+  for (i = 255; i > 0; i--) {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    var j = s % (i + 1), tmp = p[i]; p[i] = p[j]; p[j] = tmp;
+  }
+  for (i = 0; i < 512; i++) { perm[i] = p[i & 255]; permMod12[i] = perm[i] % 12; }
+})(1337);
+var GRAD3 = new Float32Array([1,1,0, -1,1,0, 1,-1,0, -1,-1,0, 1,0,1, -1,0,1,
+                              1,0,-1, -1,0,-1, 0,1,1, 0,-1,1, 0,1,-1, 0,-1,-1]);
+var F3 = 1 / 3, G3 = 1 / 6;
+
+function noise3(x, y, z) {
+  var s = (x + y + z) * F3;
+  var i = Math.floor(x + s), j = Math.floor(y + s), k = Math.floor(z + s);
+  var u = (i + j + k) * G3;
+  var x0 = x - i + u, y0 = y - j + u, z0 = z - k + u;
+  var i1, j1, k1, i2, j2, k2;
+  if (x0 >= y0) {
+    if (y0 >= z0)      { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+    else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+    else               { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+  } else {
+    if (y0 < z0)       { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+    else if (x0 < z0)  { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+    else               { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+  }
+  var x1 = x0 - i1 + G3, y1 = y0 - j1 + G3, z1 = z0 - k1 + G3;
+  var x2 = x0 - i2 + 2 * G3, y2 = y0 - j2 + 2 * G3, z2 = z0 - k2 + 2 * G3;
+  var x3 = x0 - 1 + 3 * G3, y3 = y0 - 1 + 3 * G3, z3 = z0 - 1 + 3 * G3;
+  var ii = i & 255, jj = j & 255, kk = k & 255;
+  var n = 0, tt, g;
+  tt = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+  if (tt > 0) { g = permMod12[ii + perm[jj + perm[kk]]] * 3; tt *= tt;
+    n += tt * tt * (GRAD3[g] * x0 + GRAD3[g + 1] * y0 + GRAD3[g + 2] * z0); }
+  tt = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+  if (tt > 0) { g = permMod12[ii + i1 + perm[jj + j1 + perm[kk + k1]]] * 3; tt *= tt;
+    n += tt * tt * (GRAD3[g] * x1 + GRAD3[g + 1] * y1 + GRAD3[g + 2] * z1); }
+  tt = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+  if (tt > 0) { g = permMod12[ii + i2 + perm[jj + j2 + perm[kk + k2]]] * 3; tt *= tt;
+    n += tt * tt * (GRAD3[g] * x2 + GRAD3[g + 1] * y2 + GRAD3[g + 2] * z2); }
+  tt = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+  if (tt > 0) { g = permMod12[ii + 1 + perm[jj + 1 + perm[kk + 1]]] * 3; tt *= tt;
+    n += tt * tt * (GRAD3[g] * x3 + GRAD3[g + 1] * y3 + GRAD3[g + 2] * z3); }
+  return 32 * n; // ~[-1, 1]
+}
+
+// --- grid, keyframes + segment buffers (reallocated only on resize) ---
+var CELL = 7;           // grid spacing in CSS px; contours are linearly interpolated
+var KEY = 1;            // simulated seconds between noise keyframes
+var cols = 0, rows = 0, cellPx = 0;
+var field = new Float32Array(0);
+var keyA, keyB, keyC;   // fields at kt, kt + KEY, and kt + 2*KEY (being built)
+var kt = 0;             // time of keyA
+var builtRows = 0;      // rows of keyC filled so far
+var minorSeg = new Float32Array(0), majorSeg = new Float32Array(0);
+var nMinor = 0, nMajor = 0;
+var bgGrad = null;
+
+function resize() {
+  canvas.width = Math.round(innerWidth * devicePixelRatio);
+  canvas.height = Math.round(innerHeight * devicePixelRatio);
+  cellPx = CELL * devicePixelRatio;
+  cols = Math.ceil(canvas.width / cellPx) + 1;
+  rows = Math.ceil(canvas.height / cellPx) + 1;
+  var size = (cols + 1) * (rows + 1);
+  field = new Float32Array(size);
+  keyA = new Float32Array(size); keyB = new Float32Array(size); keyC = new Float32Array(size);
+  kt = t;
+  sampleRows(keyA, kt, 0, rows + 1);
+  sampleRows(keyB, kt + KEY, 0, rows + 1);
+  builtRows = 0;
+  // A cell holds at most a few segments; size generously, grow if needed.
+  minorSeg = new Float32Array(cols * rows * 8);
+  majorSeg = new Float32Array(cols * rows * 4);
+  bgGrad = ctx.createRadialGradient(canvas.width * 0.5, canvas.height * 0.45, 0,
+                                    canvas.width * 0.5, canvas.height * 0.45,
+                                    Math.max(canvas.width, canvas.height) * 0.75);
+  bgGrad.addColorStop(0, "#0b1214");
+  bgGrad.addColorStop(1, "#030506");
+  acc = STEP; // redraw immediately
+}
+addEventListener("resize", resize);
+resize();
+
+function sampleRows(out, time, r0, r1) {
+  // Frequency is relative to screen height so the map reads the same at any size.
+  var f = 1.7 / (rows * cellPx), z = time * 0.035, drift = time * 0.012;
+  var idx = r0 * (cols + 1);
+  for (var r = r0; r < r1; r++) {
+    var y = r * cellPx * f;
+    for (var c = 0; c <= cols; c++) {
+      var x = c * cellPx * f + drift;
+      // two octaves: broad hills + finer ridges
+      out[idx++] = 0.72 * noise3(x, y, z) + 0.28 * noise3(x * 2.3 + 17, y * 2.3 - 9, z * 1.6);
+    }
+  }
+}
+
+function sampleField() {
+  // Rotate keyframes as time passes (finishing any half-built one first).
+  while (t >= kt + KEY) {
+    sampleRows(keyC, kt + 2 * KEY, builtRows, rows + 1);
+    var tmp = keyA; keyA = keyB; keyB = keyC; keyC = tmp;
+    kt += KEY; builtRows = 0;
+  }
+  // Build the next keyframe in step with progress through this interval.
+  var u = (t - kt) / KEY;
+  var want = Math.min(rows + 1, Math.ceil(u * (rows + 1)) + 1);
+  if (want > builtRows) { sampleRows(keyC, kt + 2 * KEY, builtRows, want); builtRows = want; }
+  var v = 1 - u;
+  for (var i = 0; i < field.length; i++) field[i] = keyA[i] * v + keyB[i] * u;
+}
+
+function pushSeg(major, x1, y1, x2, y2) {
+  if (major) {
+    if (nMajor + 4 > majorSeg.length) { var m = new Float32Array(majorSeg.length * 2); m.set(majorSeg); majorSeg = m; }
+    majorSeg[nMajor++] = x1; majorSeg[nMajor++] = y1; majorSeg[nMajor++] = x2; majorSeg[nMajor++] = y2;
+  } else {
+    if (nMinor + 4 > minorSeg.length) { var n = new Float32Array(minorSeg.length * 2); n.set(minorSeg); minorSeg = n; }
+    minorSeg[nMinor++] = x1; minorSeg[nMinor++] = y1; minorSeg[nMinor++] = x2; minorSeg[nMinor++] = y2;
+  }
+}
+
+// Levels span the useful range of the noise; index lines every 5th level.
+var LO = -0.78, HI = 0.78;
+
+function contour() {
+  nMinor = 0; nMajor = 0;
+  var step = (HI - LO) / (lineCount + 1);
+  var stride = cols + 1;
+  for (var r = 0; r < rows; r++) {
+    var y0 = r * cellPx, y1 = y0 + cellPx;
+    for (var c = 0; c < cols; c++) {
+      var i = r * stride + c;
+      var a = field[i], b = field[i + 1], cc = field[i + 1 + stride], d = field[i + stride];
+      var mn = Math.min(a, b, cc, d), mx = Math.max(a, b, cc, d);
+      var k0 = Math.max(1, Math.ceil((mn - LO) / step));
+      var k1 = Math.min(lineCount, Math.floor((mx - LO) / step));
+      if (k0 > k1) continue;
+      var x0 = c * cellPx, x1 = x0 + cellPx;
+      for (var k = k0; k <= k1; k++) {
+        var l = LO + k * step;
+        var cs = (a > l ? 8 : 0) | (b > l ? 4 : 0) | (cc > l ? 2 : 0) | (d > l ? 1 : 0);
+        if (cs === 0 || cs === 15) continue;
+        // edge crossings: top (a-b), right (b-cc), bottom (d-cc), left (a-d)
+        var tx = x0 + (l - a) / (b - a) * cellPx,  ty = y0;
+        var rx = x1, ry = y0 + (l - b) / (cc - b) * cellPx;
+        var bx = x0 + (l - d) / (cc - d) * cellPx, by = y1;
+        var lx = x0, ly = y0 + (l - a) / (d - a) * cellPx;
+        var major = (k % 5) === 0;
+        switch (cs) {
+          case 1: case 14: pushSeg(major, lx, ly, bx, by); break;
+          case 2: case 13: pushSeg(major, bx, by, rx, ry); break;
+          case 3: case 12: pushSeg(major, lx, ly, rx, ry); break;
+          case 4: case 11: pushSeg(major, tx, ty, rx, ry); break;
+          case 6: case 9:  pushSeg(major, tx, ty, bx, by); break;
+          case 7: case 8:  pushSeg(major, lx, ly, tx, ty); break;
+          case 5: case 10: // saddle: disambiguate with the cell centre
+            var mid = (a + b + cc + d) * 0.25;
+            if ((mid > l) === (cs === 5)) { pushSeg(major, lx, ly, tx, ty); pushSeg(major, bx, by, rx, ry); }
+            else { pushSeg(major, lx, ly, bx, by); pushSeg(major, tx, ty, rx, ry); }
+            break;
+        }
+      }
+    }
+  }
+}
+
+function strokeSegs(buf, n) {
+  ctx.beginPath();
+  for (var i = 0; i < n; i += 4) {
+    ctx.moveTo(buf[i], buf[i + 1]);
+    ctx.lineTo(buf[i + 2], buf[i + 3]);
+  }
+  ctx.stroke();
+}
+
+function rgba(a) { return "rgba(" + color.r + "," + color.g + "," + color.b + "," + a + ")"; }
+
+function draw() {
+  sampleField();
+  contour();
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  var px = devicePixelRatio;
+  ctx.lineWidth = 0.9 * px;
+  ctx.strokeStyle = rgba(0.30);
+  strokeSegs(minorSeg, nMinor);
+  ctx.lineWidth = 1.5 * px;
+  ctx.strokeStyle = rgba(0.72);
+  strokeSegs(majorSeg, nMajor);
+}
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (paused) { lastNow = now; return; }        // loop alive, zero work
+  var dt = Math.min((now - lastNow) / 1000, 0.1);
+  lastNow = now;
+  t += dt * speed;
+  acc += dt;
+  if (acc < STEP) return;
+  acc = 0;
+  draw();
+}
+requestAnimationFrame(frame);
+
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.linecolor) color = weColor(props.linecolor.value);
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.lines) lineCount = Math.round(Number(props.lines.value));
+    acc = STEP;
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

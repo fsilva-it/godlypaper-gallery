@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #07060d; }
+  /* Rendered at reduced resolution and upscaled: the silk is low-frequency,
+     so bilinear upscaling is invisible and saves most of the fragment cost. */
+  canvas { display: block; width: 100vw; height: 100vh; }
+  body.nogl { background: radial-gradient(ellipse at 30% 30%, #2a1a3e 0%, #110c1d 55%, #07060d 100%); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+var canvas = document.getElementById("c");
+
+// --- state (defaults mirror manifest.json) ---
+var colorA = [0.36, 0.20, 0.78];   // "0.36 0.2 0.78"  deep violet
+var colorB = [0.10, 0.62, 0.72];   // "0.1 0.62 0.72"  teal
+var sheen = 1;
+var speed = 1;
+var paused = false;
+var t = 0;              // simulated seconds; only advances while unpaused
+var lastNow = 0;
+
+var RES = 0.5;          // internal resolution vs. device pixels
+var MAX_W = 2048;       // cap so 5K/6K panels stay cheap
+
+var gl = canvas.getContext("webgl", {
+  alpha: false, antialias: false, depth: false, stencil: false,
+  preserveDrawingBuffer: true, powerPreference: "low-power"
+});
+var derivs = gl && gl.getExtension("OES_standard_derivatives");
+
+var VS = "attribute vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }";
+
+var FS = [
+  derivs ? "#extension GL_OES_standard_derivatives : enable" : "",
+  "#ifdef GL_FRAGMENT_PRECISION_HIGH",
+  "precision highp float;",
+  "#else",
+  "precision mediump float;",
+  "#endif",
+  "uniform vec2 uRes;",
+  "uniform float uTime;",
+  "uniform vec3 uColA;",
+  "uniform vec3 uColB;",
+  "uniform float uSheen;",
+  "float hash(vec2 p) {",
+  "  p = fract(p * vec2(123.34, 456.21));",
+  "  p += dot(p, p + 45.32);",
+  "  return fract(p.x * p.y);",
+  "}",
+  "float noise(vec2 p) {",
+  "  vec2 i = floor(p), f = fract(p);",
+  "  vec2 u = f * f * (3.0 - 2.0 * f);",
+  "  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),",
+  "             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);",
+  "}",
+  "float fbm(vec2 p) {",
+  "  float v = 0.0, a = 0.5;",
+  "  mat2 m = mat2(1.6, 1.2, -1.2, 1.6);",
+  "  for (int i = 0; i < 3; i++) { v += a * noise(p); p = m * p; a *= 0.5; }",
+  "  return v / 0.875;",
+  "}",
+  "void main() {",
+  "  vec2 uv = gl_FragCoord.xy / uRes.y;",
+  "  vec2 p = vec2(uv.x * 0.8 + uv.y * 0.3, uv.y * 1.2 - uv.x * 0.2);",
+  "  float t = uTime;",
+  // Two levels of domain warping give the long, folded silk ribbons.
+  "  vec2 q = vec2(fbm(p + vec2(0.0, 0.0) + 0.030 * t),",
+  "                fbm(p + vec2(5.2, 1.3) - 0.025 * t));",
+  "  vec2 r = vec2(fbm(p + 2.2 * q + vec2(1.7, 9.2) + 0.040 * t),",
+  "                fbm(p + 2.2 * q + vec2(8.3, 2.8) - 0.035 * t));",
+  "  float f = fbm(p + 1.8 * r);",
+  // Silk drapes: long ribbons following the warped field's iso-lines.
+  "  float h = f + 0.11 * sin(f * 11.0 + q.x * 3.0 + 0.2 * t);",
+  // Fold shading from the field's slope (fake normal).
+  "  vec3 n = vec3(0.0, 0.0, 1.0);",
+  derivs ? "  n = normalize(vec3(-dFdx(h), -dFdy(h), 0.45 / uRes.y));" : "",
+  "  vec3 L = normalize(vec3(-0.5, 0.6, 0.65));",
+  "  float diff = clamp(dot(n, L), 0.0, 1.0);",
+  "  float spec = pow(clamp(dot(reflect(-L, n), vec3(0.0, 0.0, 1.0)), 0.0, 1.0), 10.0);",
+  "  float facing = 1.0 - n.z;",
+  // Base: two user colors blended by the warp fields, deep and dark.
+  "  vec3 base = mix(uColA, uColB, smoothstep(0.25, 0.85, length(q) * 0.9));",
+  "  base = mix(base, uColA * 0.35, smoothstep(0.55, 0.95, r.x));",
+  "  vec3 col = base * (0.15 + 1.1 * f * f) * (0.45 + 0.75 * diff);",
+  // Thin-film iridescence: hue rotates with the fold angle.
+  "  vec3 film = 0.5 + 0.5 * cos(6.2831 * (facing * 2.2 + f * 0.8 + vec3(0.0, 0.33, 0.67)));",
+  "  col += uSheen * film * (0.35 * facing + 0.30 * spec) * (0.3 + f);",
+  "  col += uSheen * spec * 0.10 * (0.5 + base);",
+  // Soft vignette keeps the edges calm behind desktop icons.
+  "  vec2 c = gl_FragCoord.xy / uRes - 0.5;",
+  "  col *= 1.0 - 0.55 * dot(c, c);",
+  "  gl_FragColor = vec4(pow(col, vec3(0.9)), 1.0);",
+  "}"
+].join("\n");
+
+var prog = null, uRes, uTime, uColA, uColB, uSheen;
+
+function compile(type, src) {
+  var s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { gl.deleteShader(s); return null; }
+  return s;
+}
+
+function initGL() {
+  if (!gl) return false;
+  var vs = compile(gl.VERTEX_SHADER, VS), fs = compile(gl.FRAGMENT_SHADER, FS);
+  if (!vs || !fs) return false;
+  prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return false;
+  gl.useProgram(prog);
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(prog, "p");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  uRes = gl.getUniformLocation(prog, "uRes");
+  uTime = gl.getUniformLocation(prog, "uTime");
+  uColA = gl.getUniformLocation(prog, "uColA");
+  uColB = gl.getUniformLocation(prog, "uColB");
+  uSheen = gl.getUniformLocation(prog, "uSheen");
+  return true;
+}
+
+var ok = initGL();
+if (!ok) { document.body.className = "nogl"; canvas.style.display = "none"; }
+
+function draw() {
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.uniform1f(uTime, t);
+  gl.uniform3fv(uColA, colorA);
+  gl.uniform3fv(uColB, colorB);
+  gl.uniform1f(uSheen, sheen);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function resize() {
+  var w = innerWidth * devicePixelRatio * RES;
+  var h = innerHeight * devicePixelRatio * RES;
+  var k = w > MAX_W ? MAX_W / w : 1;
+  canvas.width = Math.max(1, Math.round(w * k));
+  canvas.height = Math.max(1, Math.round(h * k));
+  if (ok) draw();       // resizing clears the buffer; repaint even if paused
+}
+addEventListener("resize", resize);
+resize();
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (paused || !ok) { lastNow = now; return; }  // loop alive, zero work
+  var dt = Math.min((now - lastNow) / 1000, 0.1);
+  lastNow = now;
+  t += dt * speed;
+  draw();
+}
+requestAnimationFrame(frame);
+
+function weColor(v) {
+  return String(v).split(" ").slice(0, 3).map(parseFloat);
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.colora) colorA = weColor(props.colora.value);
+    if (props.colorb) colorB = weColor(props.colorb.value);
+    if (props.sheen) sheen = Number(props.sheen.value);
+    if (props.speed) speed = Number(props.speed.value);
+    if (ok) draw();
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

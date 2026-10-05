@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #070a14; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// Rain sliding down a fogged window over an out-of-focus night city.
+// The city is rendered twice: "fog" (hazy, what the glass shows) and "clear"
+// (crisper, what you see through water). Drops and their trails are written
+// into an alpha mask that reveals the clear layer. Offscreen layers run at
+// half resolution — the content is soft anyway — to keep 5K cheap.
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// --- state (defaults mirror manifest.json) ---
+var tint = { r: 1, g: 0.62, b: 0.3 };   // "1 0.62 0.3"
+var speed = 1;
+var rain = 1;
+var fog = 0.6;
+var paused = false;
+var t = 0, lastNow = 0;
+
+var LS = 0.5;                  // offscreen layer scale
+var W = 0, H = 0, D = 1;       // device px, dpr
+var fogLayer = document.createElement("canvas");
+var clearLayer = document.createElement("canvas");
+var maskLayer = document.createElement("canvas");   // persistent trails
+var compLayer = document.createElement("canvas");   // per-frame reveal
+var lensLayer = document.createElement("canvas");   // drop bodies (refraction)
+var fctx = fogLayer.getContext("2d");
+var cctx = clearLayer.getContext("2d");
+var mctx = maskLayer.getContext("2d");
+var pctx = compLayer.getContext("2d");
+var lctx = lensLayer.getContext("2d");
+var alphaSprite = document.createElement("canvas");
+var shadeSprite = document.createElement("canvas");
+var beadSprite = document.createElement("canvas");
+
+// --- city lights: generated once as fractions, re-rendered on changes ---
+var lights = [];
+var PALETTE = [null, [1, 0.86, 0.62], [0.35, 0.8, 0.95], [0.95, 0.35, 0.62], [1, 0.32, 0.25]];
+function pickColor() {
+  var k = Math.random();
+  if (k < 0.45) return null;                    // null = user tint
+  return PALETTE[1 + Math.floor(Math.random() * 4)];
+}
+function makeLights() {
+  lights = [];
+  var i;
+  for (i = 0; i < 26; i++)  // big street / car lamps near the bottom
+    lights.push({ x: Math.random(), y: 0.62 + Math.random() * 0.42, r: 0.035 + Math.random() * 0.05, a: 0.5 + Math.random() * 0.35, c: Math.random() < 0.6 ? null : pickColor() });
+  for (i = 0; i < 18; i++)  // shop signs
+    lights.push({ x: Math.random(), y: 0.4 + Math.random() * 0.4, r: 0.02 + Math.random() * 0.025, a: 0.45 + Math.random() * 0.3, c: pickColor() });
+  for (i = 0; i < 140; i++) // distant windows
+    lights.push({ x: Math.random(), y: 0.12 + Math.pow(Math.random(), 0.8) * 0.7, r: 0.006 + Math.random() * 0.013, a: 0.25 + Math.random() * 0.45, c: pickColor() });
+}
+makeLights();
+
+function rgbStr(c, a, k) {
+  return "rgba(" + Math.round(Math.min(255, c[0] * 255 * k)) + "," +
+                   Math.round(Math.min(255, c[1] * 255 * k)) + "," +
+                   Math.round(Math.min(255, c[2] * 255 * k)) + "," + a + ")";
+}
+
+function renderCity(g, w, h, clear) {
+  var bg = g.createLinearGradient(0, 0, 0, h);
+  bg.addColorStop(0, "#05070f");
+  bg.addColorStop(0.55, "#0b0d1c");
+  bg.addColorStop(1, rgbStr([tint.r, tint.g, tint.b], 1, 0.16));
+  g.globalCompositeOperation = "source-over";
+  g.fillStyle = bg;
+  g.fillRect(0, 0, w, h);
+
+  g.globalCompositeOperation = "lighter";
+  var tc = [tint.r, tint.g, tint.b];
+  for (var i = 0; i < lights.length; i++) {
+    var L = lights[i], c = L.c || tc;
+    var x = L.x * w, y = L.y * h;
+    var r = L.r * h * (clear ? 0.95 : 1.9);
+    var a = clear ? L.a * 1.2 : L.a * 0.55;
+    var gr = g.createRadialGradient(x, y, 0, x, y, r);
+    if (clear) {               // bokeh disc with a faint bright rim
+      gr.addColorStop(0, rgbStr(c, a * 0.75, 1));
+      gr.addColorStop(0.78, rgbStr(c, a * 0.85, 1));
+      gr.addColorStop(0.9, rgbStr(c, a, 1.1));
+      gr.addColorStop(1, rgbStr(c, 0, 1));
+    } else {                   // fogged: wide, soft, dimmer glow
+      gr.addColorStop(0, rgbStr(c, a, 1));
+      gr.addColorStop(0.45, rgbStr(c, a * 0.4, 1));
+      gr.addColorStop(1, rgbStr(c, 0, 1));
+    }
+    g.fillStyle = gr;
+    g.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+
+  g.globalCompositeOperation = "source-over";
+  if (!clear) {                // condensation haze on the glass
+    g.fillStyle = "rgba(150,165,195," + (0.05 + 0.14 * fog) + ")";
+    g.fillRect(0, 0, w, h);
+  }
+}
+
+function buildSprites() {
+  var S = 64, h = S / 2;
+  alphaSprite.width = alphaSprite.height = S;
+  var a = alphaSprite.getContext("2d");
+  var g = a.createRadialGradient(h, h, 0, h, h, h);
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.86, "rgba(255,255,255,1)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  a.fillStyle = g;
+  a.fillRect(0, 0, S, S);
+
+  S = 128; h = S / 2;
+  shadeSprite.width = shadeSprite.height = S;
+  var s = shadeSprite.getContext("2d");
+  // dark refractive rim, heavier at the bottom
+  g = s.createRadialGradient(h, h * 0.92, 0, h, h, h);
+  g.addColorStop(0, "rgba(0,0,0,0)");
+  g.addColorStop(0.62, "rgba(0,0,0,0)");
+  g.addColorStop(0.9, "rgba(0,0,10,0.3)");
+  g.addColorStop(1, "rgba(0,0,10,0)");
+  s.fillStyle = g;
+  s.fillRect(0, 0, S, S);
+  // specular highlight, upper left
+  g = s.createRadialGradient(S * 0.36, S * 0.3, 0, S * 0.36, S * 0.3, S * 0.17);
+  g.addColorStop(0, "rgba(255,255,255,0.9)");
+  g.addColorStop(0.35, "rgba(255,255,255,0.45)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  s.fillStyle = g;
+  s.fillRect(0, 0, S, S);
+  // faint caustic glint along the lower edge
+  g = s.createRadialGradient(h, S * 0.8, 0, h, S * 0.8, S * 0.22);
+  g.addColorStop(0, "rgba(255,255,255,0.18)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  s.fillStyle = g;
+  s.fillRect(0, 0, S, S);
+
+  // beads: tiny lenses = faint fill + rim + glint (no reveal; too small)
+  beadSprite.width = beadSprite.height = S;
+  var q = beadSprite.getContext("2d");
+  g = q.createRadialGradient(h, h, 0, h, h, h);
+  g.addColorStop(0, "rgba(220,230,255,0.10)");
+  g.addColorStop(0.7, "rgba(220,230,255,0.06)");
+  g.addColorStop(0.88, "rgba(0,0,12,0.28)");
+  g.addColorStop(1, "rgba(0,0,12,0)");
+  q.fillStyle = g;
+  q.fillRect(0, 0, S, S);
+  g = q.createRadialGradient(S * 0.38, S * 0.32, 0, S * 0.38, S * 0.32, S * 0.2);
+  g.addColorStop(0, "rgba(255,255,255,0.8)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  q.fillStyle = g;
+  q.fillRect(0, 0, S, S);
+}
+
+function rebuildLayers() {
+  renderCity(fctx, fogLayer.width, fogLayer.height, false);
+  renderCity(cctx, clearLayer.width, clearLayer.height, true);
+}
+
+// --- drops (device px) ---
+var drops = [];      // sliding
+var beads = [];      // static condensation beads
+function maxDrops() { return Math.min(70, Math.round(30 * rain)); }
+function maxBeads() { return Math.min(1100, Math.round(650 * rain * (W * H) / (2880 * 1800 * 4))); }
+
+function newBead(b, r) {
+  b.x = Math.random() * W; b.y = Math.random() * H;
+  b.r = (r || (1 + Math.pow(Math.random(), 2.6) * 8)) * D;
+  return b;
+}
+function newDrop(d, top) {
+  d.x = Math.random() * W;
+  d.y = top ? -Math.random() * 0.15 * H : Math.random() * 0.85 * H;
+  d.r = (6 + Math.random() * 8) * D;
+  d.vy = 0; d.stall = Math.random() * 1.5;
+  d.px = d.x; d.py = d.y;
+  d.ph = Math.random() * 6.283;
+  d.trav = 0;
+  return d;
+}
+
+function resize() {
+  D = devicePixelRatio || 1;
+  W = canvas.width = Math.round(innerWidth * D);
+  H = canvas.height = Math.round(innerHeight * D);
+  var lw = Math.max(1, Math.round(W * LS)), lh = Math.max(1, Math.round(H * LS));
+  fogLayer.width = clearLayer.width = maskLayer.width = compLayer.width = lensLayer.width = lw;
+  fogLayer.height = clearLayer.height = maskLayer.height = compLayer.height = lensLayer.height = lh;
+  rebuildLayers();
+  drops.length = 0; beads.length = 0;
+  var i, n = maxDrops(), m = maxBeads();
+  for (i = 0; i < n; i++) drops.push(newDrop({}, false));
+  for (i = 0; i < m; i++) beads.push(newBead({}));
+}
+buildSprites();
+addEventListener("resize", resize);
+resize();
+
+var fadeAcc = 0, spawnAcc = 0, beadAcc = 0;
+
+function step(dt) {
+  var i, j, d, b, n;
+  var termBase = 70 * D;
+
+  // rain impacts keep the glass beaded; replace random beads at cap
+  beadAcc += dt * 60 * rain;
+  while (beadAcc >= 1) {
+    beadAcc -= 1;
+    if (beads.length < maxBeads()) beads.push(newBead({}));
+    else newBead(beads[(Math.random() * beads.length) | 0]);
+  }
+  spawnAcc += dt * 1.6 * rain;
+  while (spawnAcc >= 1) {
+    spawnAcc -= 1;
+    if (drops.length < maxDrops()) drops.push(newDrop({}, Math.random() < 0.5));
+  }
+
+  for (i = drops.length - 1; i >= 0; i--) {
+    d = drops[i];
+    d.px = d.x; d.py = d.y;
+    if (d.stall > 0) {
+      d.stall -= dt;
+      d.vy *= 0.8;
+    } else {
+      var term = termBase * (0.4 + (d.r / D) * 0.16);
+      d.vy += (term - d.vy) * Math.min(1, dt * 2.5);
+      if (Math.random() < dt * 0.35 && d.r < 11 * D) d.stall = 0.2 + Math.random() * 0.9;
+    }
+    var dy = d.vy * dt;
+    d.y += dy;
+    d.x += Math.sin(t * 1.3 + d.ph + d.y * 0.004 / D) * 6 * D * dt;
+    d.trav += dy;
+
+    // leave a residue bead behind every so often, shrinking slightly
+    if (d.trav > d.r * 2.2) {
+      d.trav = 0;
+      if (Math.random() < 0.45 && beads.length > 0) {
+        b = beads[(Math.random() * beads.length) | 0];
+        b.x = d.x + (Math.random() - 0.5) * d.r * 0.5;
+        b.y = d.y - d.r * 1.4;
+        b.r = d.r * (0.14 + Math.random() * 0.12);
+        d.r *= 0.985;
+      }
+    }
+
+    // absorb beads in the path
+    var rr = d.r * 1.05;
+    for (j = beads.length - 1; j >= 0; j--) {
+      b = beads[j];
+      var bx = b.x - d.x, by = b.y - d.y, lim = rr + b.r;
+      if (bx > lim || bx < -lim || by > lim || by < -lim) continue;
+      if (bx * bx + by * by < lim * lim && b.y > d.y - d.r) {
+        d.r = Math.min(20 * D, Math.sqrt(d.r * d.r + b.r * b.r * 0.6));
+        newBead(b);          // recycle elsewhere: a fresh impact
+      }
+    }
+
+    if (d.y - d.r * 2 > H || d.r < 4 * D) {
+      if (d.r < 4 * D && beads.length > 0) {   // too small to slide: stick
+        b = beads[(Math.random() * beads.length) | 0];
+        b.x = d.x; b.y = d.y; b.r = d.r;
+      }
+      n = drops.length - 1;
+      drops[i] = drops[n]; drops.length = n;
+    }
+  }
+
+  // merge sliding drops that touch (bigger one wins)
+  for (i = 0; i < drops.length; i++) {
+    d = drops[i];
+    for (j = i + 1; j < drops.length; j++) {
+      var e = drops[j];
+      var mx = e.x - d.x, my = e.y - d.y, ml = d.r + e.r;
+      if (mx * mx + my * my < ml * ml * 0.6) {
+        var big = d.r >= e.r ? d : e, small = big === d ? e : d;
+        big.r = Math.min(22 * D, Math.sqrt(big.r * big.r + small.r * small.r));
+        big.stall = 0;
+        small.y = H * 3;   // pushed off-screen, culled next step
+      }
+    }
+  }
+}
+
+var LENS_BEAD = 3.5;   // css px: beads at least this big refract too
+
+// one drop body: flipped, minified view of the clear city around (x, y)
+function lens(x, y, r, el) {
+  var s = LS, lw = lensLayer.width, lh = lensLayer.height;
+  var dx = (x - r) * s, dy = (y - r * (2 * el - 1)) * s;
+  var dw = r * 2 * s, dh = r * 2 * el * s;
+  var sw = Math.min(lw, dw * 5), sh = Math.min(lh, dh * 5);
+  var sx = Math.max(0, Math.min(lw - sw, x * s - sw / 2));
+  var sy = Math.max(0, Math.min(lh - sh, y * s - sh / 2));
+  lctx.setTransform(1, 0, 0, -1, 0, dy * 2 + dh);
+  lctx.drawImage(clearLayer, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+
+function draw(dt) {
+  var i, d, b, s = LS;
+
+  // trails fade back to fog. Fade in coarse steps: tiny per-frame
+  // destination-out alphas stall on 8-bit rounding and leave ghosts.
+  fadeAcc += dt;
+  if (fadeAcc >= 0.25) {
+    mctx.globalCompositeOperation = "destination-out";
+    mctx.fillStyle = "rgba(0,0,0," + (1 - Math.exp(-fadeAcc * 0.9)).toFixed(4) + ")";
+    mctx.fillRect(0, 0, maskLayer.width, maskLayer.height);
+    mctx.globalCompositeOperation = "source-over";
+    fadeAcc = 0;
+  }
+  // sliding drops wipe a clear streak
+  mctx.strokeStyle = "rgba(255,255,255,0.3)";
+  mctx.lineCap = "round";
+  for (i = 0; i < drops.length; i++) {
+    d = drops[i];
+    if (d.y === d.py) continue;
+    mctx.lineWidth = d.r * 1.1 * s;
+    mctx.beginPath();
+    mctx.moveTo(d.px * s, (d.py - d.r * 0.6) * s);
+    mctx.lineTo(d.x * s, (d.y - d.r * 0.6) * s);
+    mctx.stroke();
+  }
+
+  // reveal = trails + drop bodies + beads, filled with the clear city
+  pctx.globalCompositeOperation = "source-over";
+  pctx.clearRect(0, 0, compLayer.width, compLayer.height);
+  pctx.drawImage(maskLayer, 0, 0);
+  pctx.globalCompositeOperation = "source-in";
+  pctx.drawImage(clearLayer, 0, 0);
+  pctx.globalCompositeOperation = "source-over";
+
+  // drop bodies: each is a little lens showing a flipped, minified view
+  // of the city around it. Shapes first, then source-atop fills each one
+  // without touching its neighbours.
+  var lw = lensLayer.width, lh = lensLayer.height;
+  lctx.globalCompositeOperation = "source-over";
+  lctx.clearRect(0, 0, lw, lh);
+  var bigBead = LENS_BEAD * D;
+  for (i = 0; i < drops.length; i++) {
+    d = drops[i];
+    var el = 1 + Math.min(0.32, d.vy / (220 * D));
+    lctx.drawImage(alphaSprite, (d.x - d.r) * s, (d.y - d.r * (2 * el - 1)) * s, d.r * 2 * s, d.r * 2 * el * s);
+  }
+  for (i = 0; i < beads.length; i++) {
+    b = beads[i];
+    if (b.r >= bigBead) lctx.drawImage(alphaSprite, (b.x - b.r) * s, (b.y - b.r) * s, b.r * 2 * s, b.r * 2 * s);
+  }
+  lctx.globalCompositeOperation = "source-atop";
+  for (i = 0; i < drops.length; i++) {
+    d = drops[i];
+    lens(d.x, d.y, d.r, 1 + Math.min(0.32, d.vy / (220 * D)));
+  }
+  for (i = 0; i < beads.length; i++) {
+    b = beads[i];
+    if (b.r >= bigBead) lens(b.x, b.y, b.r, 1);
+  }
+  lctx.setTransform(1, 0, 0, 1, 0, 0);
+  lctx.fillStyle = "rgba(150,160,190,0.12)";   // water lifts the blacks
+  lctx.fillRect(0, 0, lw, lh);
+  lctx.globalCompositeOperation = "source-over";
+
+  ctx.drawImage(fogLayer, 0, 0, W, H);
+  ctx.drawImage(compLayer, 0, 0, W, H);
+  ctx.drawImage(lensLayer, 0, 0, W, H);
+
+  // lens shading on top at full resolution
+  for (i = 0; i < beads.length; i++) {
+    b = beads[i];
+    ctx.drawImage(b.r >= bigBead ? shadeSprite : beadSprite, b.x - b.r, b.y - b.r, b.r * 2, b.r * 2);
+  }
+  for (i = 0; i < drops.length; i++) {
+    d = drops[i];
+    var e2 = 1 + Math.min(0.32, d.vy / (220 * D));
+    ctx.drawImage(shadeSprite, d.x - d.r, d.y - d.r * (2 * e2 - 1), d.r * 2, d.r * 2 * e2);
+  }
+}
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (paused) { lastNow = now; return; }        // loop alive, zero work
+  var dt = Math.min((now - lastNow) / 1000, 0.1);
+  lastNow = now;
+  dt *= speed;
+  t += dt;
+  step(dt);
+  draw(dt);
+}
+requestAnimationFrame(frame);
+
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: p[0], g: p[1], b: p[2] };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    var rebuild = false;
+    if (props.lightcolor) { tint = weColor(props.lightcolor.value); rebuild = true; }
+    if (props.fog) { fog = Number(props.fog.value); rebuild = true; }
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.rain) rain = Number(props.rain.value);
+    if (rebuild) rebuildLayers();
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

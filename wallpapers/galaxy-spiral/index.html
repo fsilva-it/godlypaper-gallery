@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #020208; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// --- state (defaults mirror manifest.json) ---
+var armColor = { r: 140, g: 179, b: 255 };   // "0.55 0.7 1"   young blue stars
+var coreColor = { r: 255, g: 217, b: 153 };  // "1 0.85 0.6"   old warm bulge
+var speed = 1;
+var density = 4;        // thousands of stars
+var paused = false;
+var t = 0;              // simulated seconds; only advances while unpaused
+var lastNow = 0;
+
+// Density wave: stars orbit at their own radius-dependent rate (inner stars
+// lap outer ones), while a rigid two-arm log-spiral pattern turns slowly.
+// A star lights up while it passes through an arm, so the arms persist
+// forever without winding up. Arm glow and dust lanes ride the pattern.
+var PITCH = 3.6;        // 1/tan(pitch angle): arm winding
+var PATTERN = 0.012;    // rigid pattern rotation (rad/s)
+var ARM_W = 0.36;       // angular half-width of an arm (radians)
+var INCLINE = 0.58;     // disk seen slightly from above
+var SPIN = -0.32;       // on-screen orientation of the disk
+
+// --- cached render assets (rebuilt only on resize / color change) ---
+var spriteArm = document.createElement("canvas");
+var spriteCore = document.createElement("canvas");
+var spriteWhite = document.createElement("canvas");
+var spritePink = document.createElement("canvas");
+var spriteDust = document.createElement("canvas");
+var spriteCloud = document.createElement("canvas");  // soft arm luminosity
+var spriteGlow = document.createElement("canvas");   // bulge / core
+var backdrop = document.createElement("canvas");     // bg gradient + far stars
+
+var stars = [], clouds = [], dust = [];
+var R = 1, cx = 0, cy = 0, dpr = 1;
+
+function rgba(c, a) { return "rgba(" + c.r + "," + c.g + "," + c.b + "," + a + ")"; }
+
+function buildStarSprite(cv, c) {
+  var S = 32, h = S / 2;
+  cv.width = S; cv.height = S;
+  var s = cv.getContext("2d");
+  var g = s.createRadialGradient(h, h, 0, h, h, h);
+  g.addColorStop(0.00, "rgba(255,255,255,1)");
+  g.addColorStop(0.12, rgba(c, 0.9));
+  g.addColorStop(0.35, rgba(c, 0.2));
+  g.addColorStop(1.00, rgba(c, 0));
+  s.fillStyle = g;
+  s.fillRect(0, 0, S, S);
+}
+
+function buildSoft(cv, S, stops) {
+  var h = S / 2;
+  cv.width = S; cv.height = S;
+  var s = cv.getContext("2d");
+  var g = s.createRadialGradient(h, h, 0, h, h, h);
+  for (var i = 0; i < stops.length; i++) g.addColorStop(stops[i][0], stops[i][1]);
+  s.fillStyle = g;
+  s.fillRect(0, 0, S, S);
+}
+
+function buildSprites() {
+  buildStarSprite(spriteArm, armColor);
+  buildStarSprite(spriteCore, coreColor);
+  buildStarSprite(spriteWhite, { r: 235, g: 238, b: 255 });
+  buildStarSprite(spritePink, { r: 255, g: 110, b: 165 });
+  buildSoft(spriteDust, 64, [[0, "rgba(12,5,3,0.6)"], [0.6, "rgba(12,5,3,0.25)"], [1, "rgba(12,5,3,0)"]]);
+  buildSoft(spriteCloud, 64, [[0, rgba(armColor, 0.5)], [0.5, rgba(armColor, 0.18)], [1, rgba(armColor, 0)]]);
+  buildSoft(spriteGlow, 256, [
+    [0.00, "rgba(255,248,232,0.9)"],
+    [0.10, rgba(coreColor, 0.6)],
+    [0.35, rgba(coreColor, 0.16)],
+    [0.70, rgba(coreColor, 0.03)],
+    [1.00, rgba(coreColor, 0)]
+  ]);
+}
+
+function buildBackdrop() {
+  var w = canvas.width, h = canvas.height;
+  backdrop.width = w; backdrop.height = h;
+  var b = backdrop.getContext("2d");
+  var g = b.createRadialGradient(cx, cy, 0, cx, cy, Math.max(w, h) * 0.75);
+  g.addColorStop(0, "rgb(" + Math.round(8 + armColor.r * 0.025) + "," +
+                            Math.round(8 + armColor.g * 0.025) + "," +
+                            Math.round(16 + armColor.b * 0.035) + ")");
+  g.addColorStop(1, "rgb(2,2,8)");
+  b.fillStyle = g;
+  b.fillRect(0, 0, w, h);
+  // Faint, static far-field stars (no per-frame cost).
+  var n = Math.round(w * h / 9000);
+  for (var i = 0; i < n; i++) {
+    var a = Math.random();
+    b.fillStyle = "rgba(220,225,255," + (0.08 + 0.45 * a * a * a) + ")";
+    var sz = (a > 0.97 ? 1.6 : 0.9) * dpr;
+    b.fillRect(Math.random() * w, Math.random() * h, sz, sz);
+  }
+}
+
+function gauss() {
+  return (Math.random() + Math.random() + Math.random() + Math.random() - 2) / 1.15;
+}
+
+// Trailing log-spiral: arm angle at radius a (pattern frame).
+function armAngle(a) { return -PITCH * Math.log(Math.max(a, 0.05) / 0.12); }
+
+// Orbital angular speed: flat-ish rotation curve -> differential rotation.
+function omega(a) { return 0.05 / (0.10 + a); }
+
+function makeStar() {
+  var bulge = Math.random() < 0.16;
+  var a = bulge ? Math.abs(gauss()) * 0.09
+                : Math.min(1, 0.07 - Math.log(1 - Math.random() * 0.95) * 0.34);
+  var k = Math.random(), kind, spr, alpha, size;
+  if (bulge || a < 0.11) { kind = 0; spr = spriteCore; alpha = 0.18 + 0.35 * k; size = 0.6 + 0.8 * k; }
+  else if (k < 0.05)     { kind = 2; spr = spritePink; alpha = 0.75; size = 1.6 + 1.4 * Math.random(); }
+  else if (k < 0.66)     { kind = 1; spr = spriteArm;  alpha = 0.45 + 0.55 * Math.random(); size = 0.7 + 1.8 * Math.random() * Math.random(); }
+  else                   { kind = 3; spr = spriteWhite; alpha = 0.18 + 0.4 * Math.random(); size = 0.5 + 1.0 * Math.random() * Math.random(); }
+  return { a: a, th: Math.random() * 6.2832, kind: kind, spr: spr, alpha: alpha, size: size };
+}
+
+function setDensity(n) {
+  density = n;
+  var count = Math.round(n * 1000);
+  while (stars.length > count) stars.pop();
+  while (stars.length < count) stars.push(makeStar());
+}
+
+// Pattern-frame features along both arms.
+function seedPattern() {
+  var i, a, arm;
+  for (i = 0; i < 700; i++) {
+    a = 0.11 + 0.84 * Math.pow(Math.random(), 1.15);
+    arm = i & 1;
+    clouds.push({ a: a, ph: armAngle(a) + arm * Math.PI + gauss() * 0.26,
+                  size: (0.075 - 0.035 * a) * (0.5 + Math.random() * 0.9),
+                  alpha: 0.15 * (1.05 - 0.65 * a) * (0.4 + Math.random() * 0.6) });
+  }
+  for (i = 0; i < 900; i++) {
+    a = 0.12 + 0.7 * Math.pow(Math.random(), 1.2);
+    arm = i & 1;
+    // Concave (inner) edge of a trailing arm sits slightly ahead in phase.
+    dust.push({ a: a, ph: armAngle(a) + arm * Math.PI + 0.22 + gauss() * 0.10,
+                size: (0.022 - 0.008 * a) * (0.5 + Math.random() * 1.0) });
+  }
+}
+
+function resize() {
+  dpr = devicePixelRatio || 1;
+  canvas.width = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  cx = canvas.width * 0.5;
+  cy = canvas.height * 0.5;
+  R = Math.min(canvas.width * 0.42, canvas.height * 0.80);
+  buildBackdrop();
+}
+
+buildSprites();
+addEventListener("resize", resize);
+resize();
+setDensity(density);
+seedPattern();
+
+var cosS = Math.cos(SPIN), sinS = Math.sin(SPIN);
+
+// Disk polar coords (unit radius) -> screen. Writes into out[0], out[1].
+var out = [0, 0];
+function project(a, th) {
+  var x = a * Math.cos(th), y = a * Math.sin(th) * INCLINE;
+  out[0] = cx + R * (x * cosS - y * sinS);
+  out[1] = cy + R * (x * sinS + y * cosS);
+}
+
+function armWeight(a, th, pat) {
+  // Angular distance to the nearest of the two arms, wrapped to [-pi/2, pi/2].
+  var d = th - armAngle(a) - pat;
+  d -= Math.PI * Math.round(d / Math.PI);
+  return Math.exp(-(d * d) / (2 * ARM_W * ARM_W));
+}
+
+function drawSprite(img, x, y, sz) {
+  ctx.drawImage(img, x - sz * 0.5, y - sz * 0.5 * INCLINE, sz, sz * INCLINE);
+}
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (paused) { lastNow = now; return; }        // loop alive, zero work
+  var dt = Math.min((now - lastNow) / 1000, 0.1);
+  lastNow = now;
+  t += dt * speed;
+
+  var i, s, sz, w, th, pat = PATTERN * t;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+  ctx.drawImage(backdrop, 0, 0);
+
+  ctx.globalCompositeOperation = "lighter";
+  // Bulge haze.
+  ctx.globalAlpha = 0.5;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(SPIN);
+  ctx.scale(1, INCLINE);
+  ctx.drawImage(spriteGlow, -R * 0.75, -R * 0.75, R * 1.5, R * 1.5);
+  ctx.restore();
+
+  // Arm luminosity.
+  for (i = 0; i < clouds.length; i++) {
+    s = clouds[i];
+    ctx.globalAlpha = s.alpha;
+    project(s.a, s.ph + pat);
+    drawSprite(spriteCloud, out[0], out[1], s.size * R * 2);
+  }
+
+  // Stars: true differential orbits, brightened inside the arms.
+  for (i = 0; i < stars.length; i++) {
+    s = stars[i];
+    th = s.th + omega(s.a) * t;
+    if (s.kind === 0) {
+      ctx.globalAlpha = s.alpha;
+    } else {
+      w = armWeight(s.a, th, pat);
+      ctx.globalAlpha = s.kind === 2 ? s.alpha * w * w
+                     : s.kind === 1 ? s.alpha * (0.16 + 0.84 * w)
+                     : s.alpha * (0.40 + 0.60 * w);
+      if (ctx.globalAlpha < 0.02) continue;
+    }
+    project(s.a, th);
+    sz = s.size * dpr * 5;
+    ctx.drawImage(s.spr, out[0] - sz * 0.5, out[1] - sz * 0.5, sz, sz);
+  }
+
+  // Dust lanes darken the inner edge of each arm.
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 0.28;
+  for (i = 0; i < dust.length; i++) {
+    s = dust[i];
+    project(s.a, s.ph + pat);
+    drawSprite(spriteDust, out[0], out[1], s.size * R * 2);
+  }
+
+  // Core on top.
+  ctx.globalCompositeOperation = "lighter";
+  ctx.globalAlpha = 0.85;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(SPIN);
+  ctx.scale(1, INCLINE * 1.2);
+  var cr = R * 0.22;
+  ctx.drawImage(spriteGlow, -cr, -cr, cr * 2, cr * 2);
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+requestAnimationFrame(frame);
+
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: Math.round(p[0] * 255), g: Math.round(p[1] * 255), b: Math.round(p[2] * 255) };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    var recolor = false;
+    if (props.armcolor) { armColor = weColor(props.armcolor.value); recolor = true; }
+    if (props.corecolor) { coreColor = weColor(props.corecolor.value); recolor = true; }
+    if (recolor) { buildSprites(); buildBackdrop(); }
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.density) setDensity(Number(props.density.value));
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>

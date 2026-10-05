@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "sakura-breeze",
+  "version": "1.0.0",
+  "type": "web",
+  "title": "Sakura Breeze",
+  "author": { "name": "GodlyPaper", "url": "https://github.com/godlypaper" },
+  "license": "CC0-1.0",
+  "entry": "index.html",
+  "preview": "preview.jpg",
+  "tags": ["sakura", "cherry blossom", "spring", "dusk", "calm"],
+  "contentRating": "everyone",
+  "web": { "allowNetwork": false },
+  "properties": {
+    "density":    { "type": "slider", "label": "Petals",      "order": 0, "default": 1,   "min": 0.3, "max": 2,   "step": 0.1 },
+    "wind":       { "type": "slider", "label": "Wind",        "order": 1, "default": 1,   "min": 0,   "max": 2.5, "step": 0.1 },
+    "speed":      { "type": "slider", "label": "Speed",       "order": 2, "default": 1,   "min": 0.2, "max": 3,   "step": 0.1 },
+    "petalcolor": { "type": "color",  "label": "Petal color", "order": 3, "default": "1 0.74 0.82" }
+  }
+}

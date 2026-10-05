@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2140; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// Cherry blossom petals tumbling on gusty wind at dusk. Each petal spins in
+// the plane and flips around its own axis (scaleY = cos(phi)), showing its
+// paler front or deeper back. Depth drives size, speed, softness and alpha;
+// soft sprites are made by rendering tiny and upscaling (no canvas filter).
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+
+// --- state (defaults mirror manifest.json) ---
+var petal = { r: 1, g: 0.74, b: 0.82 };   // "1 0.74 0.82"
+var speed = 1;
+var wind = 1;
+var density = 1;
+var paused = false;
+var t = 0, lastNow = 0;
+
+var W = 0, H = 0, D = 1;
+var bg = document.createElement("canvas");
+var spFront = document.createElement("canvas");
+var spBack = document.createElement("canvas");
+var spSoft = document.createElement("canvas");   // depth-of-field petal
+var spBokeh = document.createElement("canvas");  // very far / very near blur
+
+function mix(a, b, k) { return Math.round(a + (b - a) * k); }
+function col(c, k, white, a) {  // shade petal color: k = brightness, white = lift
+  return "rgba(" + mix(c.r * 255 * k, 255, white) + "," + mix(c.g * 255 * k, 255, white) + "," +
+         mix(c.b * 255 * k, 255, white) + "," + a + ")";
+}
+
+// --- sprites ---
+function petalPath(g, S) {
+  // unit petal along +x: rounded base at left, notched tip at right
+  var m = S * 0.5;
+  g.beginPath();
+  g.moveTo(S * 0.06, m);
+  g.bezierCurveTo(S * 0.12, m - S * 0.36, S * 0.62, m - S * 0.44, S * 0.95, m - S * 0.16);
+  g.quadraticCurveTo(S * 0.86, m - S * 0.06, S * 0.84, m);
+  g.quadraticCurveTo(S * 0.86, m + S * 0.06, S * 0.95, m + S * 0.16);
+  g.bezierCurveTo(S * 0.62, m + S * 0.44, S * 0.12, m + S * 0.36, S * 0.06, m);
+  g.closePath();
+}
+function drawPetal(cv, S, front) {
+  cv.width = cv.height = S;
+  var g = cv.getContext("2d");
+  g.clearRect(0, 0, S, S);
+  petalPath(g, S);
+  var gr = g.createLinearGradient(S * 0.06, 0, S * 0.95, 0);
+  if (front) {
+    gr.addColorStop(0, col(petal, 0.86, 0.0, 1));
+    gr.addColorStop(0.45, col(petal, 1, 0.22, 1));
+    gr.addColorStop(1, col(petal, 1, 0.5, 1));
+  } else {
+    gr.addColorStop(0, col(petal, 0.72, 0.0, 1));
+    gr.addColorStop(1, col(petal, 0.9, 0.25, 1));
+  }
+  g.fillStyle = gr;
+  g.fill();
+  // faint center vein + soft edge sheen
+  g.strokeStyle = col(petal, 1, 0.8, front ? 0.35 : 0.18);
+  g.lineWidth = S * 0.012;
+  g.beginPath();
+  g.moveTo(S * 0.12, S * 0.5);
+  g.quadraticCurveTo(S * 0.5, S * 0.47, S * 0.8, S * 0.5);
+  g.stroke();
+}
+function soften(dst, src, small, S) {
+  // downsample then upsample twice: cheap, smooth blur
+  var tmp = document.createElement("canvas");
+  tmp.width = tmp.height = small;
+  var tg = tmp.getContext("2d");
+  tg.imageSmoothingQuality = "high";
+  tg.drawImage(src, 0, 0, small, small);
+  var mid = document.createElement("canvas");
+  mid.width = mid.height = small * 2;
+  var mg = mid.getContext("2d");
+  mg.imageSmoothingQuality = "high";
+  mg.drawImage(tmp, 0, 0, small * 2, small * 2);
+  dst.width = dst.height = S;
+  var dg = dst.getContext("2d");
+  dg.imageSmoothingQuality = "high";
+  dg.drawImage(mid, 0, 0, S, S);
+}
+function buildSprites() {
+  drawPetal(spFront, 160, true);
+  drawPetal(spBack, 160, false);
+  var pad = document.createElement("canvas");   // padded so blur isn't clipped
+  pad.width = pad.height = 160;
+  var pg = pad.getContext("2d");
+  pg.drawImage(spFront, 30, 30, 100, 100);
+  soften(spSoft, pad, 22, 160);
+  soften(spBokeh, pad, 9, 160);
+}
+
+// --- dusk sky (rebuilt on resize / color change) ---
+function rng(seed) {             // mulberry32: same branch every rebuild
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    var r = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    r = r + Math.imul(r ^ r >>> 7, 61 | r) ^ r;
+    return ((r ^ r >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function buildBackground() {
+  bg.width = W; bg.height = H;
+  var g = bg.getContext("2d");
+  var sky = g.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, "#1a1534");
+  sky.addColorStop(0.35, "#43305f");
+  sky.addColorStop(0.62, "#9a5a7c");
+  sky.addColorStop(0.8, "#e8957f");
+  sky.addColorStop(0.92, "#ffc79a");
+  sky.addColorStop(1, "#ffe0b8");
+  g.fillStyle = sky;
+  g.fillRect(0, 0, W, H);
+
+  // low sun glow, sitting just above the far hills
+  var sx = W * 0.68, sy = H * 0.9;
+  var sun = g.createRadialGradient(sx, sy, 0, sx, sy, H * 0.75);
+  sun.addColorStop(0, "rgba(255,240,205,0.95)");
+  sun.addColorStop(0.08, "rgba(255,214,170,0.6)");
+  sun.addColorStop(0.35, "rgba(255,160,140,0.18)");
+  sun.addColorStop(1, "rgba(255,150,140,0)");
+  g.fillStyle = sun;
+  g.fillRect(0, 0, W, H);
+
+  // layered hills, paler with distance (aerial perspective)
+  ridge(g, 0.905, 0.055, "rgba(196,112,128,0.55)", 3.1);
+  ridge(g, 0.945, 0.05, "rgba(128,68,104,0.8)", 7.7);
+  ridge(g, 0.985, 0.04, "rgba(64,34,66,0.95)", 1.9);
+
+  // a whisper of the petal color in the upper air
+  var tintG = g.createRadialGradient(W * 0.2, H * 0.15, 0, W * 0.2, H * 0.15, H * 0.9);
+  tintG.addColorStop(0, col(petal, 1, 0.2, 0.14));
+  tintG.addColorStop(1, col(petal, 1, 0.2, 0));
+  g.fillStyle = tintG;
+  g.fillRect(0, 0, W, H);
+
+  drawBranch(g);
+}
+function ridge(g, base, amp, fill, seed) {
+  g.fillStyle = fill;
+  g.beginPath();
+  g.moveTo(0, H);
+  for (var i = 0; i <= 160; i++) {
+    var x = i / 160;
+    var n = 0.5 * Math.sin(x * 4.3 + seed) + 0.3 * Math.sin(x * 9.7 + seed * 2.3) +
+            0.2 * Math.sin(x * 23.1 + seed * 0.7);
+    g.lineTo(x * W, (base - amp * (0.5 + 0.5 * n)) * H);
+  }
+  g.lineTo(W, H);
+  g.closePath();
+  g.fill();
+}
+
+// blossoming branch reaching in from the top-left corner (units of H)
+function drawBranch(g) {
+  var R = rng(20260405), U = H;
+  var flowers = [];
+  g.lineCap = "round";
+  g.strokeStyle = "#2a1730";
+  function limb(x, y, ang, len, wid, depth) {
+    var steps = Math.max(4, Math.round(len * 40)), seg = len / steps;
+    for (var i = 0; i < steps; i++) {
+      ang += (R() - 0.5) * 0.28;
+      var nx = x + Math.cos(ang) * seg, ny = y + Math.sin(ang) * seg;
+      var w = wid * (1 - 0.55 * i / steps);
+      g.lineWidth = w * U;
+      g.beginPath(); g.moveTo(x * U, y * U); g.lineTo(nx * U, ny * U); g.stroke();
+      x = nx; y = ny;
+      if (depth <= 2 && R() < 0.45) flowers.push([x, y, depth]);
+      if (depth > 0 && i > steps * 0.3 && R() < 0.14)
+        limb(x, y, ang + (R() < 0.5 ? -1 : 1) * (0.5 + R() * 0.5), len * (0.35 + R() * 0.25), w * 0.6, depth - 1);
+    }
+    if (depth > 0) limb(x, y, ang + (R() - 0.5) * 0.8, len * 0.55, wid * 0.42, depth - 1);
+    for (var k = 0; k < 3; k++) flowers.push([x + (R() - 0.5) * 0.02, y + (R() - 0.5) * 0.02, 0]);
+  }
+  limb(-0.03, 0.02, 0.32, 0.62, 0.024, 3);
+  limb(0.06, -0.03, 1.05, 0.34, 0.013, 2);
+
+  // soft backlit glow behind clusters, then the flowers themselves
+  var i, f;
+  for (i = 0; i < flowers.length; i++) {
+    f = flowers[i];
+    var gr = g.createRadialGradient(f[0] * U, f[1] * U, 0, f[0] * U, f[1] * U, 0.05 * U);
+    gr.addColorStop(0, col(petal, 1, 0.3, 0.1));
+    gr.addColorStop(1, col(petal, 1, 0.3, 0));
+    g.fillStyle = gr;
+    g.fillRect((f[0] - 0.05) * U, (f[1] - 0.05) * U, 0.1 * U, 0.1 * U);
+  }
+  for (i = 0; i < flowers.length; i++) {
+    f = flowers[i];
+    var n = 1 + Math.floor(R() * 3);
+    for (var j = 0; j < n; j++) {
+      blossom(g, (f[0] + (R() - 0.5) * 0.03) * U, (f[1] + (R() - 0.5) * 0.03) * U,
+              (0.008 + R() * 0.007) * U, R() * 6.283, 0.75 + R() * 0.3, R);
+    }
+  }
+}
+function blossom(g, x, y, r, rot, k, R) {
+  g.save();
+  g.translate(x, y);
+  g.rotate(rot);
+  g.fillStyle = col(petal, k, 0.15 + R() * 0.3, 0.95);
+  for (var i = 0; i < 5; i++) {
+    g.rotate(1.2566);
+    g.beginPath();
+    g.ellipse(r * 0.62, 0, r * 0.62, r * 0.42, 0, 0, 6.283);
+    g.fill();
+  }
+  g.fillStyle = "rgba(170,60,90,0.9)";
+  g.beginPath(); g.arc(0, 0, r * 0.22, 0, 6.283); g.fill();
+  g.fillStyle = "rgba(255,225,160,0.9)";
+  for (i = 0; i < 6; i++) {
+    var a = i * 1.047 + 0.3;
+    g.beginPath(); g.arc(Math.cos(a) * r * 0.32, Math.sin(a) * r * 0.32, r * 0.06, 0, 6.283); g.fill();
+  }
+  g.restore();
+}
+
+// --- petals ---
+var petals = [];
+var MAX = 260;
+function count() { return Math.min(MAX, Math.round(130 * density)); }
+
+function spawn(p, anywhere) {
+  // depth layers: far haze (0.25-0.5), main (0.5-1.1), rare near blur (1.6-2.4)
+  var k = Math.random();
+  p.z = k < 0.3 ? 0.25 + Math.random() * 0.25 : k < 0.97 ? 0.5 + Math.random() * 0.6 : 1.6 + Math.random() * 0.8;
+  p.size = (11 + Math.random() * 7) * (0.35 + 0.65 * p.z) * D;
+  if (anywhere) {
+    p.x = Math.random() * W; p.y = Math.random() * H;
+  } else if (Math.random() < 0.55) {      // drift in from above
+    p.x = (Math.random() * 1.3 - 0.3) * W; p.y = -p.size * 2;
+  } else {                                // or from the upwind edge
+    p.x = -p.size * 2; p.y = Math.random() * H * 0.8;
+  }
+  p.th = Math.random() * 6.283;           // in-plane spin
+  p.ph = Math.random() * 6.283;           // flip
+  p.wth = (Math.random() - 0.5) * 2.2;
+  p.wph = 1.2 + Math.random() * 2.2;
+  p.sw = 0.6 + Math.random() * 0.9;       // sway freq
+  p.sp = Math.random() * 6.283;
+  p.fall = 0.75 + Math.random() * 0.5;
+  return p;
+}
+function setCount(n) {
+  while (petals.length > n) petals.pop();
+  while (petals.length < n) petals.push(spawn({}, true));
+  petals.sort(function (a, b) { return a.z - b.z; });   // far first
+}
+
+function resize() {
+  D = devicePixelRatio || 1;
+  W = canvas.width = Math.round(innerWidth * D);
+  H = canvas.height = Math.round(innerHeight * D);
+  buildBackground();
+  petals.length = 0;
+  setCount(count());
+}
+buildSprites();
+addEventListener("resize", resize);
+resize();
+
+// gusts: slow swell + occasional sharp bursts
+function gust(tt) {
+  var swell = 0.55 + 0.45 * Math.sin(tt * 0.11) * Math.sin(tt * 0.067 + 1.3);
+  var burst = Math.pow(Math.max(0, Math.sin(tt * 0.23 + 0.4)), 6) * 1.4;
+  return swell + burst;
+}
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (paused) { lastNow = now; return; }        // loop alive, zero work
+  var dt = Math.min((now - lastNow) / 1000, 0.1);
+  lastNow = now;
+  dt *= speed;
+  t += dt;
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.drawImage(bg, 0, 0);
+
+  var gs = gust(t) * wind;
+  var base = 46 * D;                 // px/s at depth 1
+  for (var i = 0; i < petals.length; i++) {
+    var p = petals[i], z = p.z;
+    var flutter = Math.sin(t * p.sw + p.sp);
+    p.x += (gs * 70 * D + flutter * 18 * D) * z * dt;
+    p.y += (base * p.fall * (1 - 0.25 * Math.min(1, gs)) + Math.cos(t * p.sw * 1.7 + p.sp) * 10 * D) * z * dt;
+    p.th += p.wth * (0.6 + gs * 0.6) * dt;
+    p.ph += p.wph * (0.7 + gs * 0.5) * dt;
+
+    var m = p.size * 2.5;
+    if (p.x > W + m || p.y > H + m || p.x < -m * 4) { spawn(p, false); continue; }
+
+    var fy = Math.cos(p.ph);
+    var ay = Math.abs(fy) < 0.12 ? (fy < 0 ? -0.12 : 0.12) : fy;
+    var c = Math.cos(p.th), s = Math.sin(p.th);
+    var sx = p.size * 2, sy = p.size * 2 * ay;
+    var sprite;
+    if (z < 0.5) { sprite = spSoft; ctx.globalAlpha = 0.3 + z * 0.7; }
+    else if (z > 1.5) { sprite = spBokeh; ctx.globalAlpha = 0.5; }
+    else { sprite = fy >= 0 ? spFront : spBack; ctx.globalAlpha = 0.92; }
+    ctx.setTransform(c * sx, s * sx, -s * sy, c * sy, p.x, p.y);
+    ctx.drawImage(sprite, -0.5, -0.5, 1, 1);
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+}
+requestAnimationFrame(frame);
+
+function weColor(v) {
+  var p = String(v).split(" ").map(parseFloat);
+  return { r: p[0], g: p[1], b: p[2] };
+}
+
+window.wallpaperPropertyListener = {
+  applyUserProperties: function (props) {
+    if (props.petalcolor) {
+      petal = weColor(props.petalcolor.value);
+      buildSprites();
+      buildBackground();
+    }
+    if (props.speed) speed = Number(props.speed.value);
+    if (props.wind) wind = Number(props.wind.value);
+    if (props.density) { density = Number(props.density.value); setCount(count()); }
+  },
+  setPaused: function (value) { paused = value; }
+};
+</script>
+</body>
+</html>
